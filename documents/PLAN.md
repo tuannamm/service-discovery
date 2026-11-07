@@ -195,8 +195,8 @@ apps/service-discovery/
 4. e2e test + chạy thử bằng `curl`.
 5. Cập nhật KNOWLEDGE.md + README.
 
-### Phần 2 (tóm tắt): `registry-client`
-- `RegistryModule.forRoot({ registryUrl, service, advertiseHost, port, instanceId?, token? })` + biến thể đọc env.
+### Phần 2 (tóm tắt): client đăng ký (nay là lib dùng chung, xem mục 10e)
+- `ServiceDiscoveryModule.forRoot()`: mọi cấu hình đọc từ env (`REGISTRY_URL`, `PORT`, ...), tuỳ chọn ghi đè bằng option.
 - Tự thu thập `@MessagePattern` bằng `DiscoveryService` + `MetadataScanner`; bỏ `@EventPattern`; pattern không phải string → bỏ qua + cảnh báo.
 - Vòng đời: bootstrap → PUT + heartbeat theo `heartbeatIntervalMs` registry trả về (timer `unref`); registry chết → service vẫn chạy, thử lại nhịp kế; 409 → log lỗi rõ; shutdown → `DELETE` best effort.
 - `instanceId` mặc định `<service>-<hostname>-<port>`.
@@ -247,7 +247,7 @@ Nhiều instance registry / replication (gossip, Raft), lưu bền, health check
 
 | # | Câu hỏi | Chốt |
 |---|---|---|
-| 1 | Mỗi app là repo riêng? | Có. `registry-client` là **bản copy** trong `echo-service/src/registry/` (giống `contracts.ts`), không có lib dùng chung |
+| 1 | Mỗi app là repo riêng? | Có (api-gateway, service-discovery). ~~`registry-client` là bản copy trong từng service~~ → **đổi ngày 2026-11-07: lib dùng chung `libs/service-discovery-client`** (mục 10e) |
 | 2 | Express hay Fastify? | **Express** (giữ scaffold) |
 | 3 | TTL / heartbeat / poll | **15s / 5s / 3s** |
 
@@ -256,7 +256,7 @@ Nhiều instance registry / replication (gossip, Raft), lưu bền, health check
 - **Version không bao giờ lùi** trong một lần chạy, kể cả khi registry hết instance.
 - **Bỏ `registeredAt`**: không dùng trong logic.
 - `PUT` trả thêm `status: created | updated | renewed`: client phát hiện registry vừa restart (đang `registered` mà nhận `created`).
-- Client **đăng ký sau `app.listen()`** (main.ts gọi `RegistryRegistration.start()`), **deregister ở `beforeApplicationShutdown`** (trước khi NestJS đóng cổng TCP).
+- Client **chỉ đăng ký khi địa chỉ quảng bá đã nhận được kết nối TCP** (module tự thăm dò, không phụ thuộc `main.ts`), **deregister ở `beforeApplicationShutdown`** (trước khi NestJS đóng cổng TCP). Bản đầu để `main.ts` gọi `start()` sau `listen()`; bản lib bỏ bước đó (mục 10e).
 - Gateway poll bằng **`setTimeout` nối tiếp** + timeout 2s mỗi lần gọi; chỉ log khi trạng thái đổi.
 
 ## 10b. Kết quả kiểm chứng chạy thật (2026-11-06)
@@ -304,7 +304,7 @@ TTL 6s, gateway poll 1s, 2 echo:
 | `RegistryStore` | `Map<project, state>` | một bảng; `register(id, body)`, `deregister(id)`, `snapshot()` |
 | Snapshot | `{ project, version, instances }` | `{ version, instances }` |
 | `/lists` | nhóm theo project, ô lọc project | thẻ service ngay dưới phần tổng hợp, chỉ còn ô tìm |
-| Client (echo-service) | env `REGISTRY_PROJECT` | bỏ; chỉ cần `REGISTRY_URL`, `REGISTRY_ADVERTISE_HOST` |
+| Client (echo-service) | env `REGISTRY_PROJECT` | bỏ; chỉ cần `REGISTRY_URL` và `PORT` (xem mục 10e) |
 | Gateway `ServiceDiscovery` | `resolve(project, pattern)` | `resolve(pattern)` |
 | File discovery tĩnh | mỗi instance có `project` | bỏ field `project` |
 | Khoá cân bằng tải | `project\|pattern` | `pattern` (một gateway chỉ phục vụ một project) |
@@ -312,6 +312,44 @@ TTL 6s, gateway poll 1s, 2 echo:
 **Không đổi:** `GATEWAY_PROJECT` vẫn dùng để chọn file spec (`specs/<project>/openapi.yml`) và gửi `meta.project` cho service; không liên quan tới registry.
 
 **Đánh đổi chấp nhận:** không dùng chung một registry cho nhiều project; quy tắc "một pattern một service" áp dụng cho cả registry; phá vỡ API cũ (không giữ route cũ). Đổi lại bỏ được một lớp cấu hình và một lỗi hay gặp (service đặt `REGISTRY_PROJECT` lệch `GATEWAY_PROJECT` thì gateway âm thầm trả 503).
+
+## 10e. Client thành lib dùng chung `@org/service-discovery-client` (2026-11-07)
+
+**Vấn đề:** client nằm trong `echo-service/src/registry/` (4 file, ~330 dòng). Mỗi service mới phải copy cả thư mục; đổi giao thức với registry (như vừa bỏ project) phải sửa mọi bản.
+
+**Quyết định (của bạn):** gom thành lib trong monorepo `libs/service-discovery-client`; mỗi service chỉ cần **import module + khai báo env**.
+
+```ts
+@Module({ imports: [ServiceDiscoveryModule.forRoot()], controllers: [UserController] })
+export class AppModule {}
+```
+```
+# .env của service
+PORT=4001
+REGISTRY_URL=http://localhost:8500
+```
+
+| Chủ đề | Chốt |
+|---|---|
+| Nơi đặt / cách dùng | `libs/service-discovery-client`, npm workspaces (`libs/*`), Nx build; service trong monorepo dùng qua `"@org/service-discovery-client": "*"` |
+| Cổng | **Biến `PORT`** mà service đã có (cũng dùng cho `createMicroservice` trong `main.ts`). Module không tự biết cổng vì NestJS không cho module đọc cấu hình của `createMicroservice` |
+| Địa chỉ quảng bá | **Tự phát hiện** IPv4 đầu tiên không phải loopback; ghi đè bằng `SERVICE_ADVERTISE_HOST`; offline thì lùi về `127.0.0.1` (có log) |
+| Tên service | `SERVICE_NAME`, mặc định `name` trong package.json (bỏ `@scope/`) |
+| Khi nào đăng ký | Module chạy nền ở `onApplicationBootstrap`: **thăm dò TCP tới `advertiseHost:PORT` đến khi nhận kết nối** rồi mới đăng ký. Không cần `main.ts` gọi gì (microservice chỉ mở cổng sau hook này) |
+| Huỷ đăng ký | `beforeApplicationShutdown` (cần `app.enableShutdownHooks()` trong `main.ts`) |
+| Không có `REGISTRY_URL` | Module tắt, in một dòng cảnh báo; service chạy như thường |
+| Cấu hình sai | Fail-fast lúc khởi tạo provider, **trước khi mở cổng** (thiếu `PORT`, URL sai, tên service sai, host `0.0.0.0`) |
+
+**Chi tiết kỹ thuật đáng nhớ:**
+- **Đọc env lazy:** `forRoot()` chạy khi file module được import, thường *trước* khi `main.ts` kịp nạp `.env`. Nên gộp cấu hình trong `useFactory` của provider (lúc `NestFactory.create`), không phải trong `forRoot()`. Vì vậy dùng `forRoot()` không tham số.
+- **Lib CJS** (không `"type": "module"`), `@nestjs/*` là **peerDependencies**: mọi service dùng chung một bản `@nestjs/common` (hai bản thì DI/decorator metadata không nhận nhau).
+- **Lib có bước build** (khác khuyến nghị "không build" của generator): service chạy bằng `nest build` (tsc) nên Node cần JS thật lúc chạy. `nx.json` có `targetDefaults` `dependsOn: ["^build"]` để build lib trước.
+- Test của lib dùng **Vitest** nên chạy được trên Node 22, kể cả `pattern-collector` (trước đây kẹt vì Jest + NestJS ESM).
+- Đổi `ECHO_PORT` thành `PORT` trong echo-service cho thống nhất với gateway.
+
+**Đánh đổi:** service nằm ngoài monorepo (như api-gateway, repo riêng) chưa dùng được cho tới khi publish package; chấp nhận vì gateway không cần (có `RegistryDiscovery` riêng).
+
+**Test:** lib 33 test (options, registry-client, pattern-collector, module tích hợp với microservice TCP thật + registry giả). Chạy thật: echo tự đăng ký qua lib, instance thứ hai chỉ cần `PORT=4002`, SIGTERM huỷ đăng ký ngay, gateway chia request qua registry.
 
 ## 11. Cách làm việc
 - Claude viết code, bạn đọc, hiểu và hỏi lại. Mỗi file: giải thích "tại sao" trước, kèm câu hỏi phỏng vấn liên quan.

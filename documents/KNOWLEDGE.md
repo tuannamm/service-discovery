@@ -45,6 +45,7 @@
 | 26 | Stored XSS, escape HTML và CSP có nonce | UI | ✅ |
 | 27 | Server render + cập nhật từng phần (partial) | UI | ✅ |
 | 28 | Registry riêng cho mỗi project hay dùng chung (multi-tenancy) | 10d | ✅ |
+| 29 | Đóng gói code dùng chung trong monorepo (lib, peerDependencies, CJS/ESM, env lazy) | 10e | ✅ |
 
 ---|---|---|---|
 | 1 | Service discovery là gì, vì sao cần | - | 📖 |
@@ -132,10 +133,10 @@ Khung trả lời (tự viết lại bằng lời mình, canh 2 phút):
 
 ## 3. Self-registration vs third-party registration
 
-- **Self-registration:** service tự gọi registry để đăng ký, heartbeat, huỷ đăng ký. Đơn giản, nhưng code đăng ký phải có trong mọi service (dự án: `registry-client`).
+- **Self-registration:** service tự gọi registry để đăng ký, heartbeat, huỷ đăng ký. Đơn giản, nhưng code đăng ký phải có trong mọi service. Giải pháp: gom thành **một thư viện dùng chung** (dự án: `@org/service-discovery-client`, xem #29).
 - **Third-party registration:** một "registrar" bên ngoài theo dõi môi trường (Docker events, Kubernetes API) rồi đăng ký thay. Service không biết gì về registry.
 
-**Trong dự án:** self-registration (`echo-service/src/registry/`, mỗi service giữ một bản copy vì các app là repo riêng), vì service phải tự khai báo **danh sách pattern** (chỉ service biết nó có `@MessagePattern` nào). Registrar bên ngoài không đọc được thông tin này.
+**Trong dự án:** self-registration qua thư viện `libs/service-discovery-client` (service chỉ import `ServiceDiscoveryModule`), vì service phải tự khai báo **danh sách pattern** (chỉ service biết nó có `@MessagePattern` nào). Registrar bên ngoài không đọc được thông tin này.
 
 **Câu hỏi phỏng vấn**
 - Đánh đổi giữa hai cách?
@@ -364,7 +365,7 @@ Một node registry là **single point of failure** (dự án giảm nhẹ nhờ
 - Service **lắng nghe** `0.0.0.0` (mọi card mạng) là bình thường.
 - Nhưng nó phải **quảng bá** địa chỉ mà **bên khác dùng để gọi tới**. Đăng ký `0.0.0.0` → gateway kết nối tới `0.0.0.0` → thất bại.
 - Trong Docker: tên service/container hoặc IP mạng nội bộ. Sau NAT: địa chỉ ngoài.
-- Dự án: `REGISTRY_ADVERTISE_HOST`; registry **từ chối** `0.0.0.0` và `::` ở bước validate.
+- Dự án: mặc định **tự phát hiện** IPv4 đầu tiên không phải loopback (chạy được local, Docker, K8s) và in ra log; ghi đè bằng `SERVICE_ADVERTISE_HOST`. Máy có VPN/nhiều card mạng có thể chọn nhầm nên cần đặt tay. Module và registry đều **từ chối** `0.0.0.0` và `::`.
 
 **Câu hỏi phỏng vấn**
 - Bind address và advertise address khác nhau thế nào?
@@ -382,7 +383,7 @@ Một node registry là **single point of failure** (dự án giảm nhẹ nhờ
 | Crash / SIGKILL | Khi hết TTL (lazy khi gateway hỏi) | ≈ TTL + poll (~18s) |
 
 - Deregister là **best effort**: lỗi cũng không chặn service tắt.
-- **Đăng ký SAU `app.listen()`** (main.ts gọi `RegistryRegistration.start()`), không đăng ký trong `onApplicationBootstrap`: lúc đó cổng TCP chưa mở, gateway có thể gửi tới một cổng chưa nghe. Chỉ quảng bá khi đã sẵn sàng (ý tưởng của **readiness**).
+- **Chỉ đăng ký khi cổng đã nhận kết nối:** với microservice, `app.listen()` chạy *sau* hook `onApplicationBootstrap`, nên đăng ký ngay ở hook đó là quảng bá một cổng chưa mở. Module chạy nền ở hook đó và **thăm dò TCP tới đúng `advertiseHost:PORT`** (khoảng nghỉ 250ms, nhân đôi tới 2s) rồi mới đăng ký; sau 10s mà vẫn chưa kết nối được thì cảnh báo (nhưng không đăng ký bừa). Thăm dò đúng địa chỉ sẽ quảng bá nên còn bắt được lỗi cấu hình sai `PORT` hoặc host (ý tưởng của **readiness**). Bản đầu để `main.ts` gọi `start()` sau `listen()`; bản lib bỏ bước đó.
 - **Thứ tự tắt của NestJS khi nhận SIGTERM:** `onModuleDestroy` → **`beforeApplicationShutdown`** → `dispose` (đóng cổng TCP) → `onApplicationShutdown`. Dự án gọi `DELETE` ở `beforeApplicationShutdown`, tức **trước** khi đóng cổng: gateway thôi gửi request mới trong lúc service còn xử lý nốt.
 - Thứ tự đúng khi tắt: deregister → chờ một chút để gateway cập nhật → đóng listener → xử lý nốt request đang chạy (*draining*).
 - Timer heartbeat phải `unref()`, nếu không process không thoát được.
@@ -664,6 +665,48 @@ default-src 'none'; script-src 'nonce-<ngẫu nhiên>'; style-src 'unsafe-inline
 
 ---
 
+## 29. Đóng gói code dùng chung trong monorepo (lib, peerDependencies, CJS/ESM, env lazy)
+
+**Vấn đề:** code đăng ký (~330 dòng) cần ở **mọi** service. Copy-paste thì mỗi lần đổi giao thức phải sửa N chỗ, và các bản lệch nhau dần (đã gặp: bỏ project khỏi URL phải sửa mọi bản).
+
+**Giải pháp:** thư viện `libs/service-discovery-client` (npm workspace `@org/service-discovery-client`). Service chỉ cần:
+```ts
+@Module({ imports: [ServiceDiscoveryModule.forRoot()] })   // + REGISTRY_URL và PORT trong .env
+```
+
+**Các quyết định kỹ thuật (mỗi cái là một câu phỏng vấn):**
+
+| Vấn đề | Chọn | Vì sao |
+|---|---|---|
+| `@nestjs/*` trong lib | **`peerDependencies`**, không phải `dependencies` | Mọi service dùng chung **một** bản `@nestjs/common`. Hai bản thì `@Injectable`/`@Inject`/metadata của bản này không được container của bản kia nhận ra |
+| Định dạng module | **CJS** (không `"type": "module"`) | CJS dùng được cho cả service CJS (`require`) lẫn ESM (`import`). Lib ESM-only chỉ `require()` được từ CJS khi Node ≥ 22.12 |
+| Lib có build không | **Có** (generator mặc định khuyên không) | Service chạy bằng `nest build` (tsc) nên Node cần JS thật lúc chạy; lib "không build" chỉ hợp khi consumer tự bundle source. `targetDefaults` `dependsOn: ["^build"]` để Nx build lib trước |
+| Đọc env | **Lazy**, trong `useFactory` của provider | `forRoot()` chạy khi file được `import`, thường *trước* khi `main.ts` nạp `.env`; đọc env ở đó sẽ thấy giá trị rỗng |
+| Cấu hình sai | Ném lỗi lúc khởi tạo provider | Fail-fast **trước khi mở cổng**; NestFactory mặc định `process.abort()` khi khởi tạo lỗi |
+| Test | Vitest | Chạy ESM trực tiếp nên test được cả code import `@nestjs/*` trên Node 22 (Jest kẹt do NestJS 12 ESM-only) |
+| Phạm vi API | Chỉ export module, `ServiceDiscoveryOptions`, `ServiceDiscoveryConfigError` | API nhỏ thì đổi nội bộ không vỡ consumer |
+
+**Mô hình cấu hình "convention over configuration":** mặc định hợp lý cho mọi thứ (tên service từ `package.json`, địa chỉ quảng bá tự phát hiện, instance id từ hostname), chỉ **bắt buộc** `REGISTRY_URL` và `PORT`; mọi thứ có thể ghi đè bằng env hoặc option. Thứ tự ưu tiên: **option > env > mặc định**.
+
+**Cái bẫy gặp phải khi làm:**
+- Generator `@nx/js:library` tự thêm `vitest ~5` và `vite ^8` vào root, xung đột peer với `vitest ^4` của registry (`ERESOLVE`) → gỡ, để lib dùng cùng phiên bản với registry.
+- `npm install` vẫn lỗi `edgesOut` → `--legacy-peer-deps`.
+- Nx báo "workspace out of sync" cho tới khi `nx sync` thêm TypeScript project references (service → lib).
+
+**Giới hạn:** service ở repo riêng (như api-gateway) chưa dùng được cho tới khi publish package lên npm (private) hoặc cài từ git; đổi lại không phải dựng npm registry riêng ngay bây giờ.
+
+**Câu hỏi phỏng vấn**
+- Khi nào nên gom code thành thư viện dùng chung, khi nào chấp nhận copy?
+- `dependencies` khác `peerDependencies` thế nào? Vì sao thư viện NestJS phải khai báo Nest là peer?
+- CommonJS và ES Modules: thư viện nên phát hành định dạng nào? `require()` một ESM-only package có được không?
+- Vì sao đọc biến môi trường trong `forRoot()` có thể sai? (Thứ tự import so với lúc nạp `.env`.)
+- Monorepo: Nx giải quyết việc build đúng thứ tự giữa lib và app thế nào?
+
+**Tự trả lời:**
+> _(viết bằng lời của bạn)_
+
+---
+
 ## Bẫy thực tế
 
 | Bẫy | Hậu quả | Cách tránh |
@@ -677,7 +720,7 @@ default-src 'none'; script-src 'nonce-<ngẫu nhiên>'; style-src 'unsafe-inline
 | `setInterval` để poll qua mạng | Request chồng nhau, bảng cũ ghi đè bảng mới | `setTimeout` nối tiếp + timeout mỗi lần gọi |
 | Chỉ dựa vào sweeper định kỳ | Instance chết vẫn giữ pattern giữa hai lần quét | Hết hạn lazy khi đọc/ghi |
 | Reset version khi registry hết instance | Version về 0, ETag cũ trùng bảng mới | Version chỉ tăng trong một lần chạy |
-| Đăng ký trong `onApplicationBootstrap` | Quảng bá cổng chưa mở | Đăng ký sau `app.listen()` |
+| Đăng ký ngay trong `onApplicationBootstrap` | Quảng bá cổng chưa mở (microservice chỉ mở cổng sau hook này) | Thăm dò TCP tới địa chỉ quảng bá rồi mới đăng ký |
 | Log mỗi lần heartbeat/poll | Ngập log | Log theo chuyển trạng thái |
 | `npm install` lỗi `Cannot read properties of null (reading 'edgesOut')` | Không cài được | Lỗi của npm khi giải peer deps; dùng `npm install --legacy-peer-deps` |
 | Jest + NestJS 12 trên Node 22 | Test import `@nestjs/*` không chạy (ESM-only) | Core không import NestJS; registry dùng Vitest (chạy ESM trực tiếp) |
@@ -717,6 +760,9 @@ default-src 'none'; script-src 'nonce-<ngẫu nhiên>'; style-src 'unsafe-inline
 | Partial rendering | Server trả một mảnh HTML để thay vào trang (kiểu htmx/Turbo) |
 | Multi-tenancy | Một hệ thống phục vụ nhiều khách hàng/project, cần cách ly dữ liệu giữa họ |
 | Blast radius | Phạm vi bị ảnh hưởng khi một thành phần hỏng |
+| peerDependencies | Phụ thuộc mà thư viện yêu cầu *consumer* tự cài, để cả hệ thống dùng chung một bản |
+| Convention over configuration | Mặc định hợp lý cho mọi thứ, người dùng chỉ khai báo phần bắt buộc |
+| Lazy configuration | Đọc cấu hình lúc cần (khởi tạo provider) thay vì lúc import file |
 
 ---
 
@@ -728,3 +774,4 @@ default-src 'none'; script-src 'nonce-<ngẫu nhiên>'; style-src 'unsafe-inline
 | 2026-11-06 | Code Phần 1 (registry), Phần 2 (client trong echo-service), Phần 3 (`RegistryDiscovery` ở gateway); chạy thật đủ 6 kịch bản | Lazy expiry; `setTimeout` nối tiếp; log theo chuyển trạng thái; đăng ký sau `listen`, deregister ở `beforeApplicationShutdown` | |
 | 2026-11-07 | Trang `/lists` + `GET /v1/overview`: health theo heartbeat, pattern theo service, tự cập nhật 2s | Health thụ động (healthy ≤ 1.5 nhịp / late); stored XSS → escape lúc xuất + CSP nonce; server render + partial | |
 | 2026-11-07 | Bỏ project khỏi registry (một registry = một project application), đổi API, store, `/lists`, client, interface gateway | Bỏ một chiều khỏi mô hình dữ liệu kéo theo đổi mọi tầng; shared vs per-project tenancy; blast radius | |
+| 2026-11-07 | Gom client đăng ký thành lib `@org/service-discovery-client`: service chỉ import module + `REGISTRY_URL`/`PORT` | peerDependencies, CJS vs ESM, đọc env lazy, thăm dò TCP để biết cổng đã mở, Nx build lib trước app | |

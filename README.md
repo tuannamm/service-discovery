@@ -6,6 +6,7 @@ Sổ danh bạ động cho hệ thống microservices: service **tự đăng ký
 - Kiến thức ôn phỏng vấn: [documents/KNOWLEDGE.md](./documents/KNOWLEDGE.md), câu hỏi: [documents/INTERVIEW-QUESTIONS.md](./documents/INTERVIEW-QUESTIONS.md)
 > **Một registry = một project application.** Registry không có khái niệm project: chỉ có một bảng service/instance. Muốn chạy nhiều project thì chạy nhiều registry (mỗi cái một cổng), mỗi gateway trỏ tới registry của project mình.
 
+- Service đăng ký lên registry bằng thư viện dùng chung [`libs/service-discovery-client`](../../libs/service-discovery-client/README.md): chỉ cần import `ServiceDiscoveryModule` và đặt `REGISTRY_URL` + `PORT` trong `.env`.
 - Bản trực quan: mở `knowledge.html` (sinh lại bằng `npm run docs:knowledge` sau khi sửa markdown)
 
 ## Chạy
@@ -45,13 +46,13 @@ curl -i localhost:8500/v1/snapshot
 cd apps/service-discovery && npm run start:dev
 # 2. Hai echo tự đăng ký (echo tự nạp .env; biến trên dòng lệnh thắng .env)
 cd apps/echo-service
-cp .env.example .env          # lần đầu: đã có REGISTRY_URL, REGISTRY_ADVERTISE_HOST
+cp .env.example .env          # lần đầu: đã có PORT=4001 và REGISTRY_URL
 npm run start:dev                       # instance 1, cổng 4001
-ECHO_PORT=4002 npm run start:dev        # instance 2
-# Thấy "Registered example/..." là đã đăng ký; thấy "Registry disabled" là thiếu REGISTRY_URL
+PORT=4002 npm run start:dev             # instance 2
+# Thấy "Registered echo-service-..." là đã đăng ký; thấy "Service discovery disabled" là thiếu REGISTRY_URL
 # 3. Gateway đọc từ registry
 cd apps/api-gateway
-GATEWAY_PROJECT=example GATEWAY_DISCOVERY_FILE= GATEWAY_REGISTRY_URL=http://localhost:8500 npm run start:dev
+GATEWAY_PROJECT=example GATEWAY_REGISTRY_URL=http://localhost:8500 npm run start:dev
 curl localhost:3000/users/42
 ```
 

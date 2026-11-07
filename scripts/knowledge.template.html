@@ -425,14 +425,15 @@ footer { color: var(--muted); font-size: 12.5px; padding-block: 0 32px; }
       </div>
       <div class="planes" id="planes">
         <div class="panel plane data">
-          <span class="eyebrow">Service · registry-client</span>
+          <span class="eyebrow">Service · service-discovery-client</span>
           <h3>Service: tự đăng ký</h3>
-          <div class="when">echo-service/src/registry · registry chết thì service vẫn chạy, chỉ thử lại</div>
+          <div class="when">libs/service-discovery-client · chỉ cần import ServiceDiscoveryModule + REGISTRY_URL, PORT · registry chết thì service vẫn chạy, chỉ thử lại</div>
           <ol>
+            <li>Thăm dò TCP tới <code>advertiseHost:PORT</code>, cổng mở mới đăng ký <code>service-discovery.module.ts</code></li>
             <li>Gom <code>@MessagePattern</code> lúc khởi động <code>pattern-collector.ts</code></li>
             <li>PUT body đầy đủ, host là địa chỉ quảng bá <code>registry-client.ts</code></li>
             <li>Heartbeat = cùng PUT, mỗi <code>heartbeatIntervalMs</code></li>
-            <li>SIGTERM: DELETE trước khi đóng cổng <code>registry-client.module.ts</code></li>
+            <li>SIGTERM: DELETE trước khi đóng cổng <code>service-discovery.module.ts</code></li>
           </ol>
           <div class="rule">Heartbeat mang cả body: registry mất RAM thì heartbeat kế tiếp tự dựng lại bản ghi.</div>
         </div>
@@ -629,12 +630,12 @@ footer { color: var(--muted); font-size: 12.5px; padding-block: 0 32px; }
 
   // ================= OVERVIEW: simulator (vòng đời một instance) =================
   const STEPS = [
-    { t: 'Thu thập pattern', file: 'registry-client.module.ts · pattern-collector.ts', d: 'Lúc khởi động, DiscoveryService + MetadataScanner duyệt mọi controller và đọc metadata <code>@MessagePattern</code>. <code>@EventPattern</code> bị bỏ qua (event đi qua broker, gateway không gọi tới); pattern dạng object như <code>{ cmd: "x" }</code> bị bỏ qua kèm cảnh báo vì operationId luôn là chuỗi.', fails: [] },
+    { t: 'Thu thập pattern', file: 'service-discovery.module.ts · pattern-collector.ts', d: 'Module chạy nền ở <code>onApplicationBootstrap</code>: thăm dò TCP tới <code>advertiseHost:PORT</code> (địa chỉ quảng bá tự phát hiện, <code>PORT</code> đọc từ .env) đến khi nhận kết nối, vì microservice chỉ mở cổng sau hook này. Rồi DiscoveryService + MetadataScanner duyệt mọi controller và đọc metadata <code>@MessagePattern</code>. <code>@EventPattern</code> bị bỏ qua (event đi qua broker, gateway không gọi tới); pattern dạng object như <code>{ cmd: "x" }</code> bị bỏ qua kèm cảnh báo vì operationId luôn là chuỗi.', fails: [] },
     { t: 'Đăng ký (PUT)', file: 'registry-client.ts → registry.controller.ts', d: '<code>PUT /v1/instances/:id</code> với body đầy đủ <code>{ service, host, port, patterns }</code>. <code>host</code> là địa chỉ quảng bá mà gateway gọi tới được, không bao giờ là 0.0.0.0. Registry kiểm tra theo thứ tự: token, hình dạng body, rồi xung đột pattern TRƯỚC khi ghi.', fails: ['401 UNAUTHORIZED', '400 INVALID_REGISTRATION', '409 PATTERN_CONFLICT'] },
     { t: 'Ghi vào RegistryStore', file: 'registry-store.ts', d: 'Upsert bản ghi và đặt hạn lease. <code>version</code> chỉ tăng khi dữ liệu thật sự đổi. Trả về <code>{ status: created | updated | renewed, leaseTtlMs, heartbeatIntervalMs }</code>, trong đó <code>heartbeatIntervalMs = TTL/3</code>: lỡ hai nhịp liên tiếp vẫn chưa bị gỡ.', fails: [] },
     { t: 'Heartbeat', file: 'registry-client.ts', d: 'Gửi lại đúng PUT đó mỗi <code>heartbeatIntervalMs</code>, bằng setTimeout nối tiếp (xong lần này mới hẹn lần sau) và <code>unref()</code> để timer không giữ process sống. Body y hệt → <code>renewed</code>, version không đổi → gateway nhận 304.', fails: ['registry chết → thử lại, service vẫn chạy'] },
     { t: 'Gateway đồng bộ', file: 'registry-discovery.ts', d: 'Cứ 3s gateway <code>GET /v1/snapshot</code> kèm <code>If-None-Match</code>. 200: dựng bảng pattern → instances mới rồi thay cả bảng một lần. 304: giữ nguyên. Lỗi mạng hay 5xx: giữ bảng cũ (stale-on-error). <code>resolve()</code> chỉ đọc bảng này.', fails: ['503 NO_INSTANCE khi chưa có snapshot'] },
-    { t: 'Rời đi', file: 'registry-client.module.ts · registry-store.ts · sweeper.service.ts', d: 'SIGTERM: <code>beforeApplicationShutdown</code> gửi DELETE (204) trước khi đóng cổng, lần poll kế tiếp gateway không còn thấy instance. SIGKILL: không có DELETE, lease hết hạn; registry gỡ lazy khi có người đọc và sweep mỗi TTL/3, hook <code>onExpire</code> ghi log.', fails: ['204 DELETE', 'expired theo TTL'] },
+    { t: 'Rời đi', file: 'service-discovery.module.ts · registry-store.ts · sweeper.service.ts', d: 'SIGTERM: <code>beforeApplicationShutdown</code> gửi DELETE (204) trước khi đóng cổng, lần poll kế tiếp gateway không còn thấy instance. SIGKILL: không có DELETE, lease hết hạn; registry gỡ lazy khi có người đọc và sweep mỗi TTL/3, hook <code>onExpire</code> ghi log.', fails: ['204 DELETE', 'expired theo TTL'] },
   ];
   const problem = (status, title, code, detail, instance, extra = {}) =>
     JSON.stringify({ type: 'about:blank', title, status, code, detail, instance, ...extra }, null, 2);
@@ -673,7 +674,7 @@ footer { color: var(--muted); font-size: 12.5px; padding-block: 0 32px; }
         'HTTP/1.1 400 Bad Request\ncontent-type: application/problem+json\n\n' +
         problem(400, 'Bad Request', 'INVALID_REGISTRATION', 'The registration is invalid.', '/v1/instances/echo-1',
           { errors: ['"host" must be an address other services can reach, not "0.0.0.0" (set an advertise host).'] }),
-      note: '0.0.0.0 là địa chỉ để LẮNG NGHE, không phải để GỌI TỚI. echo-service tự chặn từ lúc đọc env (REGISTRY_ADVERTISE_HOST); registry chặn lần nữa cho client khác.' },
+      note: '0.0.0.0 là địa chỉ để LẮNG NGHE, không phải để GỌI TỚI. module service-discovery-client tự chặn lúc khởi tạo (SERVICE_ADVERTISE_HOST), service không khởi động; registry chặn lần nữa cho client khác.' },
     { name: 'Registry restart', req: 'registry mất RAM', status: '200', tone: 's2',
       passed: [0, 1, 2, 3, 4], stop: null, focus: 3,
       res: '[Gateway] Registry unreachable (fetch failed); keeping the last snapshot (2 instance(s)).\n\n' +

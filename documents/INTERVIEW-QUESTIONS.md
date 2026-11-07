@@ -82,17 +82,19 @@ Mức độ: 🟢 cơ bản · 🟡 trung bình · 🔴 nâng cao
 - [ ] 🟢 **Thiết kế API: vì sao PUT? DELETE không tồn tại trả gì? Registry rỗng trả gì?**
   *Ý chính:* client chọn id + idempotent; 204 idempotent; 200 rỗng (trạng thái hợp lệ, không phải 404). · 📚 #10
 
-### B2. Client (`echo-service/src/registry`)
+### B2. Client (`libs/service-discovery-client`)
 - [ ] 🟡 **Service biết mình xử lý pattern nào bằng cách nào?**
   *Ý chính:* `DiscoveryService` + `MetadataScanner` đọc metadata `microservices:pattern` và `handler_type`; bỏ EventPattern và pattern object. · 📚 #22
 - [ ] 🟡 **Registry chết thì service làm gì?**
   *Ý chính:* vẫn chạy; log warn một lần; thử lại theo nhịp; registry sống lại thì heartbeat tự khôi phục, client nhận "created" và cảnh báo re-registered. · 📚 #5, #21
 - [ ] 🔴 **Khi nào service đăng ký và huỷ đăng ký? Vì sao chọn đúng thời điểm đó?**
-  *Ý chính:* sau `app.listen()` (không quảng bá cổng chưa mở); `beforeApplicationShutdown` chạy trước `dispose` nên DELETE trước khi đóng cổng (draining). · 📚 #15
+  *Ý chính:* khi địa chỉ quảng bá đã nhận kết nối TCP (module thăm dò, vì microservice chỉ mở cổng sau `onApplicationBootstrap`); `beforeApplicationShutdown` chạy trước `dispose` nên DELETE trước khi đóng cổng (draining). · 📚 #15
 - [ ] 🟡 **Vì sao không được quảng bá `0.0.0.0`? Trong Docker dùng gì?**
-  *Ý chính:* bind ≠ advertise; `REGISTRY_ADVERTISE_HOST`; Docker dùng tên service; registry từ chối 0.0.0.0. · 📚 #14
-- [ ] 🟡 **Vì sao client là bản copy trong mỗi service thay vì thư viện dùng chung?**
-  *Ý chính:* mỗi app là repo riêng; copy nhỏ, không phụ thuộc phiên bản lib; đánh đổi: đổi giao thức phải cập nhật mọi bản. · 📚 #3
+  *Ý chính:* bind ≠ advertise; mặc định tự phát hiện IPv4 không phải loopback, ghi đè bằng `SERVICE_ADVERTISE_HOST`; Docker dùng tên service; module và registry đều từ chối 0.0.0.0. · 📚 #14
+- [ ] 🟡 **Làm sao để hàng chục service đăng ký lên registry mà không lặp code?**
+  *Ý chính:* gom thành thư viện NestJS dùng chung (`ServiceDiscoveryModule`); service chỉ import module + đặt `REGISTRY_URL`, `PORT` trong `.env`; mọi thứ khác có mặc định (tên từ package.json, địa chỉ tự phát hiện). Đổi giao thức chỉ sửa một chỗ. · 📚 #29
+- [ ] 🔴 **Thư viện NestJS dùng chung cần lưu ý gì khi đóng gói?**
+  *Ý chính:* `@nestjs/*` là `peerDependencies` (một bản duy nhất, tránh DI vỡ); phát hành CJS để cả CJS lẫn ESM dùng được; có bước build vì consumer chạy JS; đọc env lazy trong `useFactory` vì `forRoot()` chạy trước khi `.env` được nạp; Nx build lib trước app. · 📚 #29
 
 ### B3. Gateway (`RegistryDiscovery`)
 - [ ] 🟡 **Gateway lấy danh sách instance thế nào? Vì sao không hỏi registry mỗi request?**
