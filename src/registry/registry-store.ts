@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { systemClock, type Clock } from './clock.js';
 import { PatternConflictError } from './errors.js';
-import { validateInstanceId, validateProject, validateRegistration } from './validation.js';
+import { validateInstanceId, validateRegistration } from './validation.js';
 import type {
   InstanceRecord,
-  ProjectSummary,
   RegisterResult,
   RegistrationInput,
   Overview,
@@ -32,20 +31,16 @@ interface PatternOwner {
   ids: Set<string>;
 }
 
-interface ProjectState {
-  version: number;
-  instances: Map<string, InstanceRecord>;
-  /** pattern → chủ. Tính lại mỗi khi bảng đổi, để kiểm tra xung đột O(1). */
-  owners: Map<string, PatternOwner>;
-}
-
 /**
  * CORE của registry: lưu in-memory, không biết HTTP, không có timer.
  *
+ * Một registry phục vụ MỘT project application, nên không có khái niệm project ở đây: chỉ có
+ * MỘT bảng instance. Muốn chạy nhiều project thì chạy nhiều registry.
+ *
  * Hết hạn theo hai đường (giống Redis xử lý key có TTL):
- *  - LAZY: mọi thao tác trên một project gỡ ngay instance đã hết hạn của project đó trước,
- *    nên kết quả luôn đúng tại thời điểm gọi, không phụ thuộc lúc sweeper chạy.
- *  - ĐỊNH KỲ: `sweep()` (lớp HTTP gọi theo nhịp) dọn các project không ai đụng tới, và để có log.
+ *  - LAZY: mọi thao tác gỡ ngay instance đã hết hạn trước, nên kết quả luôn đúng tại thời điểm
+ *    gọi, không phụ thuộc lúc sweeper chạy.
+ *  - ĐỊNH KỲ: `sweep()` (lớp HTTP gọi theo nhịp) dọn khi không ai hỏi tới, và để có log.
  */
 export class RegistryStore {
   readonly bootId: string;
@@ -55,7 +50,12 @@ export class RegistryStore {
   private readonly clock: Clock;
   private readonly wallClock: () => number;
   private readonly onExpire?: (record: InstanceRecord) => void;
-  private readonly projects = new Map<string, ProjectState>();
+
+  /** Chỉ tăng khi bảng đổi; không bao giờ lùi trong một lần chạy. */
+  private version = 0;
+  private readonly instances = new Map<string, InstanceRecord>();
+  /** pattern → chủ. Tính lại mỗi khi bảng đổi, để kiểm tra xung đột O(1). */
+  private owners = new Map<string, PatternOwner>();
 
   constructor(options: RegistryStoreOptions) {
     if (!Number.isFinite(options.leaseTtlMs) || options.leaseTtlMs <= 0) {
@@ -73,20 +73,19 @@ export class RegistryStore {
    * Đăng ký HOẶC heartbeat: cùng một lệnh, luôn mang đủ dữ liệu (idempotent).
    * Registry restart mất sạch RAM thì heartbeat kế tiếp tự khôi phục (soft state).
    */
-  register(project: string, id: string, body: unknown): RegisterResult {
-    const input = validateRegistration(project, id, body);
-    const state = this.stateFor(project);
-    this.expire(state);
+  register(id: string, body: unknown): RegisterResult {
+    const input = validateRegistration(id, body);
+    this.expire();
 
     // KIỂM TRA HẾT rồi mới GHI: có xung đột thì không đổi gì cả (không có trạng thái nửa vời).
-    const conflicts = this.findConflicts(state, id, input);
-    if (conflicts.length) throw new PatternConflictError(project, conflicts);
+    const conflicts = this.findConflicts(id, input);
+    if (conflicts.length) throw new PatternConflictError(conflicts);
 
-    const previous = state.instances.get(id);
+    const previous = this.instances.get(id);
     const now = this.clock.now();
     // registeredAt giữ nguyên qua các lần update: vẫn là cùng một instance (cùng id).
     const registeredAt = previous?.registeredAt ?? this.wallClock();
-    const record: InstanceRecord = { ...input, id, project, lastSeen: now, registeredAt };
+    const record: InstanceRecord = { ...input, id, lastSeen: now, registeredAt };
 
     if (previous && sameRegistration(previous, input)) {
       // Heartbeat thuần: chỉ gia hạn, KHÔNG tăng version → gateway poll nhận 304.
@@ -94,37 +93,30 @@ export class RegistryStore {
       return this.result('renewed');
     }
 
-    state.instances.set(id, record);
-    this.changed(state);
+    this.instances.set(id, record);
+    this.changed();
     return this.result(previous ? 'updated' : 'created');
   }
 
   /** Huỷ đăng ký. Không tồn tại cũng không lỗi (idempotent). Trả về có gỡ được gì không. */
-  deregister(project: string, id: string): boolean {
-    validateProject(project);
+  deregister(id: string): boolean {
     validateInstanceId(id);
-    const state = this.projects.get(project);
-    if (!state?.instances.delete(id)) return false;
-    this.changed(state);
+    if (!this.instances.delete(id)) return false;
+    this.changed();
     return true;
   }
 
-  /** Gỡ mọi instance hết hạn ở mọi project. Trả về danh sách đã gỡ (để log). */
+  /** Gỡ mọi instance hết hạn. Trả về danh sách đã gỡ (để log). */
   sweep(): InstanceRecord[] {
-    const removed: InstanceRecord[] = [];
-    for (const state of this.projects.values()) removed.push(...this.expire(state));
-    return removed;
+    return this.expire();
   }
 
-  snapshot(project: string): Snapshot {
-    validateProject(project);
-    const state = this.projects.get(project);
-    if (!state) return { project, version: 0, instances: [] };
-    this.expire(state);
-    const instances = [...state.instances.values()]
+  snapshot(): Snapshot {
+    this.expire();
+    const instances = [...this.instances.values()]
       .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .map(toSnapshotInstance);
-    return { project, version: state.version, instances };
+    return { version: this.version, instances };
   }
 
   /**
@@ -140,36 +132,27 @@ export class RegistryStore {
     return Math.floor(this.heartbeatIntervalMs * 1.5);
   }
 
-  /**
-   * Toàn cảnh mọi project → service → instance, kèm health. Chỉ đọc (sau khi gỡ instance hết hạn).
-   * Project không còn instance nào thì bỏ qua (vẫn giữ state bên trong để version không lùi).
-   */
+  /** Toàn cảnh service → instance, kèm health. Chỉ đọc (sau khi gỡ instance hết hạn). */
   overview(): Overview {
-    this.sweep();
+    this.expire();
     const now = this.clock.now();
-    const projects = [...this.projects.entries()]
-      .filter(([, state]) => state.instances.size > 0)
+    const byService = new Map<string, OverviewInstance[]>();
+    for (const record of this.instances.values()) {
+      const list = byService.get(record.service) ?? [];
+      list.push(this.toOverviewInstance(record, now));
+      byService.set(record.service, list);
+    }
+    const services: OverviewService[] = [...byService.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
-      .map(([project, state]) => {
-        const byService = new Map<string, OverviewInstance[]>();
-        for (const record of state.instances.values()) {
-          const list = byService.get(record.service) ?? [];
-          list.push(this.toOverviewInstance(record, now));
-          byService.set(record.service, list);
-        }
-        const services: OverviewService[] = [...byService.entries()]
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([service, instances]) => {
-            instances.sort((a, b) => a.id.localeCompare(b.id));
-            return {
-              service,
-              instanceCount: instances.length,
-              healthyCount: instances.filter((i) => i.health === 'healthy').length,
-              patterns: [...new Set(instances.flatMap((i) => i.patterns))].sort(),
-              instances,
-            };
-          });
-        return { project, version: state.version, services };
+      .map(([service, instances]) => {
+        instances.sort((a, b) => a.id.localeCompare(b.id));
+        return {
+          service,
+          instanceCount: instances.length,
+          healthyCount: instances.filter((i) => i.health === 'healthy').length,
+          patterns: [...new Set(instances.flatMap((i) => i.patterns))].sort(),
+          instances,
+        };
       });
 
     return {
@@ -178,53 +161,36 @@ export class RegistryStore {
       leaseTtlMs: this.leaseTtlMs,
       heartbeatIntervalMs: this.heartbeatIntervalMs,
       healthyThresholdMs: this.healthyThresholdMs,
-      projects,
+      version: this.version,
+      services,
     };
-  }
-
-  projectsSummary(): ProjectSummary[] {
-    this.sweep();
-    return [...this.projects.entries()]
-      .map(([project, state]) => ({ project, version: state.version, instanceCount: state.instances.size }))
-      .sort((a, b) => a.project.localeCompare(b.project));
   }
 
   // ---------------------------------------------------------------------------
 
-  private stateFor(project: string): ProjectState {
-    let state = this.projects.get(project);
-    if (!state) {
-      state = { version: 0, instances: new Map(), owners: new Map() };
-      this.projects.set(project, state);
-    }
-    // Project hết instance vẫn GIỮ state (không xoá) để version không quay về 0 trong cùng
-    // một lần chạy: version lùi lại thì ETag cũ có thể trùng với bảng mới.
-    return state;
-  }
-
-  private expire(state: ProjectState): InstanceRecord[] {
+  private expire(): InstanceRecord[] {
     const now = this.clock.now();
     const removed: InstanceRecord[] = [];
-    for (const [id, record] of state.instances) {
+    for (const [id, record] of this.instances) {
       if (now - record.lastSeen > this.leaseTtlMs) {
-        state.instances.delete(id);
+        this.instances.delete(id);
         removed.push(record);
         this.onExpire?.(record);
       }
     }
-    if (removed.length) this.changed(state);
+    if (removed.length) this.changed();
     return removed;
   }
 
   /**
-   * Một pattern chỉ thuộc MỘT service trong một project. Nhiều instance của CÙNG service giữ
+   * Một pattern chỉ thuộc MỘT service trong registry. Nhiều instance của CÙNG service giữ
    * cùng pattern là bình thường (scale ngang). Bỏ qua chính instance `id` đang đăng ký lại,
    * để một instance đổi tên service của chính nó không tự xung đột với mình.
    */
-  private findConflicts(state: ProjectState, id: string, input: RegistrationInput) {
+  private findConflicts(id: string, input: RegistrationInput) {
     const conflicts: Array<{ pattern: string; owner: string }> = [];
     for (const pattern of input.patterns) {
-      const owner = state.owners.get(pattern);
+      const owner = this.owners.get(pattern);
       if (!owner || owner.service === input.service) continue;
       const othersHolding = [...owner.ids].some((holder) => holder !== id);
       if (othersHolding) conflicts.push({ pattern, owner: owner.service });
@@ -233,14 +199,14 @@ export class RegistryStore {
   }
 
   /** Bảng đổi: tăng version và tính lại chủ của từng pattern. */
-  private changed(state: ProjectState): void {
-    state.version += 1;
-    state.owners.clear();
-    for (const record of state.instances.values()) {
+  private changed(): void {
+    this.version += 1;
+    this.owners = new Map();
+    for (const record of this.instances.values()) {
       for (const pattern of record.patterns) {
-        const owner = state.owners.get(pattern) ?? { service: record.service, ids: new Set<string>() };
+        const owner = this.owners.get(pattern) ?? { service: record.service, ids: new Set<string>() };
         owner.ids.add(record.id);
-        state.owners.set(pattern, owner);
+        this.owners.set(pattern, owner);
       }
     }
   }

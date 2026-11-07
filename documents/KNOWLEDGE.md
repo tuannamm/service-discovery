@@ -44,6 +44,7 @@
 | 25 | Health thụ động từ heartbeat (healthy / late) | UI | ✅ |
 | 26 | Stored XSS, escape HTML và CSP có nonce | UI | ✅ |
 | 27 | Server render + cập nhật từng phần (partial) | UI | ✅ |
+| 28 | Registry riêng cho mỗi project hay dùng chung (multi-tenancy) | 10d | ✅ |
 
 ---|---|---|---|
 | 1 | Service discovery là gì, vì sao cần | - | 📖 |
@@ -97,7 +98,7 @@ Khung trả lời (tự viết lại bằng lời mình, canh 2 phút):
 - **Đăng ký:** cách instance vào/ra registry.
 - **Tra cứu:** cách bên gọi lấy danh sách instance.
 
-**Trong dự án:** registry riêng (`apps/service-discovery`), tra theo **pattern** (`@MessagePattern`) trong phạm vi **project**. Gateway là bên tra cứu duy nhất ở thời điểm này.
+**Trong dự án:** registry riêng (`apps/service-discovery`), tra theo **pattern** (`@MessagePattern`). **Một registry phục vụ một project application** nên không có khái niệm project trong registry (chạy nhiều project = chạy nhiều registry). Gateway là bên tra cứu duy nhất ở thời điểm này.
 
 **Câu hỏi phỏng vấn**
 - Vì sao không cấu hình cứng IP của service?
@@ -151,7 +152,7 @@ Khung trả lời (tự viết lại bằng lời mình, canh 2 phút):
 
 **Con số trong dự án:** TTL 15s, heartbeat 5s (= TTL/3), sweep 5s.
 - Heartbeat = TTL/3 → lỡ **2 nhịp** (mạng chập chờn, GC pause) vẫn chưa bị gỡ.
-- Instance chết bị gỡ **ngay khi hết TTL** nếu có ai hỏi tới project (hết hạn lazy, xem #19); gateway poll mỗi 3s nên thấy sau tối đa `TTL + poll` ≈ 18s. Sweep (TTL/3) chỉ dọn project không ai hỏi.
+- Instance chết bị gỡ **ngay khi hết TTL** nếu có ai hỏi tới (hết hạn lazy, xem #19); gateway poll mỗi 3s nên thấy sau tối đa `TTL + poll` ≈ 18s. Sweep (TTL/3) chỉ dọn khi không ai hỏi.
 - Registry **trả** `heartbeatIntervalMs` trong response của PUT → registry quyết định nhịp, đổi TTL không phải sửa client.
 
 **Đánh đổi:** TTL ngắn → phát hiện chết nhanh nhưng dễ gỡ oan + nhiều tải heartbeat. TTL dài → ngược lại.
@@ -230,7 +231,7 @@ Ngoài ra còn **phát hiện thụ động ở phía bên gọi** (outlier dete
 
 ## 8. Phiên bản, ETag, 304 và `bootId`
 
-**Cơ chế:** mỗi project có `version`, **chỉ tăng khi bảng đổi** (thêm/gỡ/đổi instance). Heartbeat thuần không tăng.
+**Cơ chế:** registry có một `version`, **chỉ tăng khi bảng đổi** (thêm/gỡ/đổi instance). Heartbeat thuần không tăng.
 - Registry gửi `ETag: "<bootId>-<version>"`.
 - Gateway gửi lại `If-None-Match` ở lần poll kế. Khớp → **304 Not Modified**, không có body.
 - Phần lớn lần poll chỉ tốn một response rỗng.
@@ -256,7 +257,7 @@ Có `bootId` thì ETag sau restart chắc chắn khác. Ý tưởng giống **ep
 
 **Tóm tắt:** tìm theo **việc làm được** (pattern) thay vì **tên service**. Spec của gateway chỉ có `operationId`, không ghi tên service.
 
-**Quy tắc:** một pattern chỉ thuộc **một service** trong một project; nhiều **instance** của cùng service giữ cùng pattern là bình thường (đó là scale ngang).
+**Quy tắc:** một pattern chỉ thuộc **một service** trong toàn registry; nhiều **instance** của cùng service giữ cùng pattern là bình thường (đó là scale ngang).
 - Xung đột → 409, **không ghi gì** (kiểm tra hết rồi mới ghi, tránh trạng thái nửa vời).
 - Pattern được giải phóng khi instance cuối của service chủ bị gỡ.
 
@@ -282,7 +283,7 @@ Có `bootId` thì ETag sau restart chắc chắn khác. Ý tưởng giống **ep
 | `DELETE` trả 204 kể cả khi không tồn tại | Idempotent; service tắt có thể gọi nhiều lần |
 | 409 cho xung đột pattern | Request hợp lệ nhưng xung đột với trạng thái hiện tại |
 | 400 gom mọi lỗi validate | Client sửa một lần, không phải thử từng lỗi |
-| Snapshot project rỗng → 200 `instances: []` | "Chưa ai đăng ký" là trạng thái hợp lệ, không phải "không tìm thấy" |
+| Snapshot rỗng → 200 `instances: []` | "Chưa ai đăng ký" là trạng thái hợp lệ, không phải "không tìm thấy" |
 | Prefix `/v1` | Chừa chỗ đổi hợp đồng sau |
 | Lỗi RFC 9457 | Thống nhất với gateway |
 
@@ -455,12 +456,12 @@ Một node registry là **single point of failure** (dự án giảm nhẹ nhờ
 **Vấn đề:** nếu chỉ có sweeper chạy mỗi 5s, giữa hai lần quét registry vẫn trả về instance đã hết hạn, và instance đã chết vẫn **giữ pattern** (service khác đăng ký pattern đó bị 409 oan).
 
 **Cách làm (giống Redis xử lý key có TTL):**
-- **Lazy:** mọi thao tác trên một project (`register`, `snapshot`) gỡ instance hết hạn của project đó **trước**. Kết quả luôn đúng tại thời điểm gọi.
-- **Định kỳ:** `SweeperService` gọi `sweep()` mỗi TTL/3 để dọn project không ai hỏi tới (giải phóng RAM) và để log "expired" đúng lúc.
+- **Lazy:** mọi thao tác (`register`, `snapshot`, `overview`) gỡ instance hết hạn **trước**. Kết quả luôn đúng tại thời điểm gọi.
+- **Định kỳ:** `SweeperService` gọi `sweep()` mỗi TTL/3 để dọn khi không ai hỏi tới (giải phóng RAM) và để log "expired" đúng lúc.
 - Log nằm ở hook `onExpire` của store, nên gỡ kiểu nào cũng có log.
 - Timer nằm ở lớp NestJS, **core không có timer**: test gọi `sweep()` trực tiếp, không cần fake timer.
 
-**Thêm: version không bao giờ lùi.** Project hết instance vẫn giữ state (không xoá), vì xoá rồi tạo lại thì version về 0, ETag cũ có thể trùng bảng mới.
+**Thêm: version không bao giờ lùi.** Registry hết instance thì version vẫn giữ nguyên (chỉ tăng), không về 0 trong một lần chạy, vì version lùi thì ETag cũ có thể trùng bảng mới.
 
 **Câu hỏi phỏng vấn**
 - Redis xoá key hết hạn thế nào? (Lazy khi truy cập + quét ngẫu nhiên định kỳ.)
@@ -620,12 +621,43 @@ default-src 'none'; script-src 'nonce-<ngẫu nhiên>'; style-src 'unsafe-inline
 - **Cập nhật mỗi 2s:** JS gọi `GET /lists?partial=1`, server trả **đúng phần nội dung** đã render, JS thay vào `#content`. Ý tưởng giống **htmx / Hotwire Turbo**: server trả HTML thay vì JSON.
 - So với cách "JSON + render bằng JS": chỉ có **một** chỗ render (server), không phải viết lại giao diện bằng hai ngôn ngữ, và escape nằm ở một nơi. JSON vẫn có ở `/v1/overview` cho máy đọc (monitoring, CLI).
 - Poll bằng **`setTimeout` nối tiếp** như gateway (#20); **dừng khi tab ẩn** (`visibilitychange`) để không tốn tài nguyên; registry mất kết nối thì hiện "đang thử lại" và giữ nội dung cũ (stale-on-error ở phía UI).
-- Bộ lọc (project, ô tìm) chạy hoàn toàn ở client và **áp lại sau mỗi lần thay nội dung**.
+- Ô tìm kiếm chạy hoàn toàn ở client và **áp lại sau mỗi lần thay nội dung**.
 - `Cache-Control: no-store`: trang trạng thái luôn phải là dữ liệu mới.
 
 **Câu hỏi phỏng vấn**
 - Server-side rendering và client-side rendering khác nhau thế nào? Khi nào chọn cái nào?
 - Cập nhật realtime: polling, long-polling, SSE, WebSocket. Bạn chọn gì cho trang này, vì sao?
+
+**Tự trả lời:**
+> _(viết bằng lời của bạn)_
+
+---
+
+## 28. Registry riêng cho mỗi project hay dùng chung (multi-tenancy)
+
+**Quyết định của dự án:** mỗi project application chạy **một registry riêng**; registry không có khái niệm project (PLAN mục 10d). Ban đầu thiết kế ngược lại (một registry, mọi thứ khoá theo project), rồi đổi.
+
+| | Một registry dùng chung (nhiều project) | **Mỗi project một registry (dự án chọn)** |
+|---|---|---|
+| Cách ly | Phải tự đảm bảo trong code (khoá theo project ở mọi API, mọi bảng) | **Cách ly vật lý**: bug hay overload ở project A không chạm project B |
+| Blast radius | Registry hỏng = **mọi** project mất discovery | Registry hỏng = chỉ project đó |
+| Độ phức tạp code | Thêm tham số `project` ở API, store, client, gateway, UI | **Đơn giản hơn**: một bảng, một version, một ETag |
+| Vận hành | Một thứ để chạy, giám sát, nâng cấp | N registry để chạy (rẻ vì nhỏ, in-memory) |
+| Lỗi cấu hình | Service đặt sai project: lặng lẽ không ai thấy → 503 | Không có biến này để sai (sai URL thì thấy ngay) |
+| Quy tắc "một pattern một service" | Trong phạm vi từng project | Trong cả registry (ranh giới = project) |
+
+**Mẫu quen thuộc:** đây là lựa chọn giữa **shared multi-tenant** và **single-tenant per deployment** (cell-based architecture). Sản phẩm thực tế có cả hai kiểu:
+- Consul dùng **namespaces / admin partitions** trong một cluster; Kubernetes dùng **namespace**.
+- Eureka thường chạy **một cluster cho mỗi môi trường** và đặt tên theo `appName`.
+
+**Khi nào dùng chung đáng giá:** hàng trăm project nhỏ, mỗi cái ít instance, vận hành N registry là gánh nặng; cần nhìn toàn cảnh tất cả project ở một nơi.
+
+**Bài học thiết kế:** bỏ một chiều (project) khỏi mô hình dữ liệu kéo theo thay đổi ở **mọi tầng** (URL, store, snapshot, UI, client env, interface gateway, file discovery tĩnh). Mô hình dữ liệu càng sớm đơn giản càng đỡ tốn.
+
+**Câu hỏi phỏng vấn**
+- Multi-tenancy: dùng chung hay tách riêng? Đánh đổi?
+- Blast radius là gì? Cell-based architecture giải quyết vấn đề gì?
+- Bạn đã bỏ một khái niệm khỏi hệ thống đang chạy chưa? Ảnh hưởng tới những đâu?
 
 **Tự trả lời:**
 > _(viết bằng lời của bạn)_
@@ -644,7 +676,7 @@ default-src 'none'; script-src 'nonce-<ngẫu nhiên>'; style-src 'unsafe-inline
 | Timer không `unref()` | Process không thoát | `unref()` / clear khi shutdown |
 | `setInterval` để poll qua mạng | Request chồng nhau, bảng cũ ghi đè bảng mới | `setTimeout` nối tiếp + timeout mỗi lần gọi |
 | Chỉ dựa vào sweeper định kỳ | Instance chết vẫn giữ pattern giữa hai lần quét | Hết hạn lazy khi đọc/ghi |
-| Xoá project khi hết instance | Version về 0, ETag trùng | Giữ state project |
+| Reset version khi registry hết instance | Version về 0, ETag cũ trùng bảng mới | Version chỉ tăng trong một lần chạy |
 | Đăng ký trong `onApplicationBootstrap` | Quảng bá cổng chưa mở | Đăng ký sau `app.listen()` |
 | Log mỗi lần heartbeat/poll | Ngập log | Log theo chuyển trạng thái |
 | `npm install` lỗi `Cannot read properties of null (reading 'edgesOut')` | Không cài được | Lỗi của npm khi giải peer deps; dùng `npm install --legacy-peer-deps` |
@@ -683,6 +715,8 @@ default-src 'none'; script-src 'nonce-<ngẫu nhiên>'; style-src 'unsafe-inline
 | Output encoding | Escape dữ liệu lúc xuất ra, theo đúng ngữ cảnh (HTML, attribute, JSON...) |
 | CSP nonce | Mã ngẫu nhiên mỗi response; chỉ script mang đúng mã mới được chạy |
 | Partial rendering | Server trả một mảnh HTML để thay vào trang (kiểu htmx/Turbo) |
+| Multi-tenancy | Một hệ thống phục vụ nhiều khách hàng/project, cần cách ly dữ liệu giữa họ |
+| Blast radius | Phạm vi bị ảnh hưởng khi một thành phần hỏng |
 
 ---
 
@@ -693,3 +727,4 @@ default-src 'none'; script-src 'nonce-<ngẫu nhiên>'; style-src 'unsafe-inline
 | 2026-11-06 | Viết PLAN.md + KNOWLEDGE.md cho service-discovery (chưa code) | Bổ sung `bootId` trong ETag, monotonic clock cho TTL, kiểm tra xung đột trước khi ghi | |
 | 2026-11-06 | Code Phần 1 (registry), Phần 2 (client trong echo-service), Phần 3 (`RegistryDiscovery` ở gateway); chạy thật đủ 6 kịch bản | Lazy expiry; `setTimeout` nối tiếp; log theo chuyển trạng thái; đăng ký sau `listen`, deregister ở `beforeApplicationShutdown` | |
 | 2026-11-07 | Trang `/lists` + `GET /v1/overview`: health theo heartbeat, pattern theo service, tự cập nhật 2s | Health thụ động (healthy ≤ 1.5 nhịp / late); stored XSS → escape lúc xuất + CSP nonce; server render + partial | |
+| 2026-11-07 | Bỏ project khỏi registry (một registry = một project application), đổi API, store, `/lists`, client, interface gateway | Bỏ một chiều khỏi mô hình dữ liệu kéo theo đổi mọi tầng; shared vs per-project tenancy; blast radius | |

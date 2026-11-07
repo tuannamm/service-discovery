@@ -3,7 +3,7 @@
  * nên sau này đổi framework HTTP hay viết CLI dùng lại store đều được.
  */
 
-/** Body service gửi lên khi `PUT /v1/projects/:project/instances/:id` (đăng ký hoặc heartbeat). */
+/** Body service gửi lên khi `PUT /v1/instances/:id` (đăng ký hoặc heartbeat). */
 export interface RegistrationInput {
   /** Tên service, dùng cho log/metrics và để kiểm tra xung đột pattern. Gateway KHÔNG định tuyến theo tên. */
   service: string;
@@ -19,7 +19,6 @@ export interface RegistrationInput {
 /** Bản ghi registry giữ trong RAM. */
 export interface InstanceRecord extends RegistrationInput {
   id: string;
-  project: string;
   /**
    * Lần cuối nhận đăng ký/heartbeat, đo bằng đồng hồ MONOTONIC của registry
    * (không tin thời gian service gửi lên, không dùng Date.now() vì có thể nhảy).
@@ -39,9 +38,8 @@ export interface SnapshotInstance {
   metadata?: Record<string, string>;
 }
 
-/** Kết quả `GET /v1/projects/:project/snapshot`. */
+/** Kết quả `GET /v1/snapshot`. */
 export interface Snapshot {
-  project: string;
   /** Chỉ tăng khi bảng đổi. Heartbeat thuần không làm tăng. */
   version: number;
   instances: SnapshotInstance[];
@@ -84,12 +82,6 @@ export interface OverviewService {
   instances: OverviewInstance[];
 }
 
-export interface OverviewProject {
-  project: string;
-  version: number;
-  services: OverviewService[];
-}
-
 /** Toàn cảnh registry cho trang /lists và GET /v1/overview. */
 export interface Overview {
   bootId: string;
@@ -99,11 +91,7 @@ export interface Overview {
   heartbeatIntervalMs: number;
   /** Heartbeat cũ hơn ngưỡng này thì instance bị coi là "late". */
   healthyThresholdMs: number;
-  projects: OverviewProject[];
-}
-
-export interface ProjectSummary {
-  project: string;
+  /** Version của bảng (cùng số với snapshot): chỉ tăng khi bảng đổi. */
   version: number;
-  instanceCount: number;
+  services: OverviewService[];
 }

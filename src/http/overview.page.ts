@@ -1,4 +1,4 @@
-import type { Overview, OverviewInstance, OverviewProject, OverviewService } from '../registry/types.js';
+import type { Overview, OverviewInstance, OverviewService } from '../registry/types.js';
 
 /**
  * Trang /lists: render HTML ở SERVER, bằng hàm thuần (Overview → string), không template engine.
@@ -39,7 +39,6 @@ export function renderOverviewPage(overview: Overview, nonce: string): string {
   </div>
 </header>
 <div class="filters">
-  <label>Project <select id="project"><option value="">Tất cả</option></select></label>
   <label class="grow">Tìm <input id="search" type="search" placeholder="service, instance hoặc pattern (VD user.getById)" autocomplete="off"></label>
 </div>
 <main id="content">${renderOverviewContent(overview)}</main>
@@ -48,16 +47,15 @@ export function renderOverviewPage(overview: Overview, nonce: string): string {
 </html>`;
 }
 
-/** Phần nội dung thay được (summary + các project). Dùng cho cả trang đầy đủ và `?partial=1`. */
+/** Phần nội dung thay được (summary + các service). Dùng cho cả trang đầy đủ và `?partial=1`. */
 export function renderOverviewContent(overview: Overview): string {
-  const services = overview.projects.flatMap((p) => p.services);
+  const services = overview.services;
   const instances = services.flatMap((s) => s.instances);
   const healthy = instances.filter((i) => i.health === 'healthy').length;
   const late = instances.length - healthy;
 
   const summary = `
 <section class="summary" aria-label="Tổng quan">
-  ${stat('Project', overview.projects.length)}
   ${stat('Service', services.length)}
   ${stat('Instance', instances.length)}
   ${stat('Healthy', healthy, 'ok')}
@@ -67,28 +65,20 @@ export function renderOverviewContent(overview: Overview): string {
   Lease TTL <b>${seconds(overview.leaseTtlMs)}</b> · heartbeat mỗi <b>${seconds(overview.heartbeatIntervalMs)}</b> ·
   <span class="dot ok"></span> healthy: heartbeat ≤ ${seconds(overview.healthyThresholdMs)} ·
   <span class="dot warn"></span> late: đã lỡ nhịp, sẽ bị gỡ khi hết TTL ·
+  version <b title="Chỉ tăng khi bảng đổi">v${overview.version}</b> ·
   boot <code title="${escapeHtml(overview.bootId)}">${escapeHtml(overview.bootId.slice(0, 8))}</code> ·
   cập nhật ${time(overview.generatedAt)}
 </p>`;
 
-  if (overview.projects.length === 0) {
+  if (services.length === 0) {
     return `${summary}
 <section class="empty">
   <h2>Chưa có service nào đăng ký</h2>
   <p>Chạy một service có cấu hình registry, ví dụ trong <code>apps/echo-service</code>:</p>
-  <pre>REGISTRY_URL=http://localhost:8500 REGISTRY_PROJECT=example \\
-REGISTRY_ADVERTISE_HOST=127.0.0.1 npm run start:dev</pre>
+  <pre>REGISTRY_URL=http://localhost:8500 REGISTRY_ADVERTISE_HOST=127.0.0.1 npm run start:dev</pre>
 </section>`;
   }
-  return summary + overview.projects.map(renderProject).join('');
-}
-
-function renderProject(project: OverviewProject): string {
-  return `
-<section class="project" data-project="${escapeHtml(project.project)}">
-  <h2>${escapeHtml(project.project)} <span class="version" title="Version của snapshot: chỉ tăng khi bảng đổi">v${project.version}</span></h2>
-  ${project.services.map(renderService).join('')}
-</section>`;
+  return `${summary}<section class="services">${services.map(renderService).join('')}</section>`;
 }
 
 function renderService(service: OverviewService): string {
@@ -102,12 +92,12 @@ function renderService(service: OverviewService): string {
     <span class="badge ${allHealthy ? 'ok' : 'warn'}">${service.healthyCount}/${service.instanceCount} healthy</span>
   </header>
   <div class="patterns" aria-label="Pattern">
-    <span class="label">${service.patterns.length} pattern</span>
-    ${service.patterns.map((p) => `<code class="chip" data-pattern="${escapeHtml(p.toLowerCase())}">${escapeHtml(p)}</code>`).join('')}
+    <span class="label">Service xử lý ${service.patterns.length} pattern:</span>
+    ${service.patterns.map(chip).join('')}
   </div>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Health</th><th>Instance</th><th>Địa chỉ</th><th>Heartbeat cuối</th><th>Lease còn lại</th><th>Đăng ký lúc</th><th>Pattern</th></tr></thead>
+      <thead><tr><th>Health</th><th>Instance</th><th>Địa chỉ</th><th>Heartbeat cuối</th><th>Lease còn lại</th><th>Đăng ký lúc</th><th>Message pattern đã đăng ký</th></tr></thead>
       <tbody>${service.instances.map(renderInstance).join('')}</tbody>
     </table>
   </div>
@@ -129,8 +119,13 @@ function renderInstance(instance: OverviewInstance): string {
   <td class="num">${ago(instance.lastHeartbeatAgoMs)}</td>
   <td>${leaseBar(instance)}</td>
   <td>${time(instance.registeredAt)}</td>
-  <td class="num" title="${escapeHtml(instance.patterns.join(', '))}">${instance.patterns.length}</td>
+  <td><div class="cell-patterns">${instance.patterns.map(chip).join('')}</div></td>
 </tr>`;
+}
+
+/** Một pattern dạng "chip". `data-pattern` để ô tìm kiếm tô sáng pattern khớp. */
+function chip(pattern: string): string {
+  return `<code class="chip" data-pattern="${escapeHtml(pattern.toLowerCase())}">${escapeHtml(pattern)}</code>`;
 }
 
 function leaseBar(instance: OverviewInstance): string {
@@ -206,9 +201,7 @@ main { padding: 14px clamp(16px, 4vw, 40px) 40px; }
 .stat.ok .value { color: var(--ok); }
 .stat.warn .value { color: var(--warn); }
 .meta { color: var(--muted); font-size: 12.5px; margin: 10px 0 4px; }
-.project { margin-top: 22px; }
-.project h2 { font-size: 15px; margin: 0 0 10px; display: flex; gap: 8px; align-items: baseline; }
-.version { color: var(--muted); font-weight: 500; font-size: 12px; }
+.services { margin-top: 18px; }
 .service { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; }
 .service > header { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .service h3 { margin: 0; font-size: 15px; }
@@ -218,6 +211,8 @@ main { padding: 14px clamp(16px, 4vw, 40px) 40px; }
 .patterns { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 12px; }
 .patterns .label { color: var(--muted); font-size: 12px; margin-right: 4px; }
 .chip { background: var(--chip); border-radius: 6px; padding: 2px 8px; }
+.cell-patterns { display: flex; flex-wrap: wrap; gap: 4px; min-width: 200px; }
+td .chip { padding: 1px 6px; font-size: 12px; }
 .chip.hit { background: var(--accent); color: var(--panel); }
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; min-width: 720px; }
@@ -251,7 +246,7 @@ tr.is-late td { background: var(--warn-soft); }
  * - Poll `/lists?partial=1` bằng setTimeout NỐI TIẾP (xong lần này mới hẹn lần sau), dừng khi tab ẩn.
  * - Nội dung thay vào bằng innerHTML: an toàn vì server đã escape; và CSP chặn mọi script/handler
  *   chèn vào (script trong innerHTML không chạy, handler `on...` không có nonce).
- * - Lọc theo project / tìm kiếm áp lại sau mỗi lần thay nội dung.
+ * - Tìm kiếm áp lại sau mỗi lần thay nội dung.
  */
 const SCRIPT = `
 (() => {
@@ -259,7 +254,6 @@ const SCRIPT = `
   const content = document.getElementById('content');
   const status = document.getElementById('status');
   const pause = document.getElementById('pause');
-  const projectSelect = document.getElementById('project');
   const search = document.getElementById('search');
   let paused = false;
   let timer;
@@ -273,37 +267,24 @@ const SCRIPT = `
     });
   }
 
-  function syncProjects() {
-    const selected = projectSelect.value;
-    const names = [...content.querySelectorAll('[data-project]')].map((s) => s.dataset.project);
-    projectSelect.replaceChildren(new Option('Tất cả', ''), ...names.map((n) => new Option(n, n)));
-    projectSelect.value = names.includes(selected) ? selected : '';
-  }
-
   function applyFilters() {
-    const project = projectSelect.value;
     const q = search.value.trim().toLowerCase();
     let visible = 0;
-    content.querySelectorAll('[data-project]').forEach((section) => {
-      let shown = 0;
-      section.querySelectorAll('.service').forEach((card) => {
-        const match = !q || card.dataset.search.includes(q);
-        card.hidden = !match;
-        card.querySelectorAll('.chip').forEach((chip) => chip.classList.toggle('hit', !!q && chip.dataset.pattern.includes(q)));
-        if (match) shown++;
-      });
-      section.hidden = (project && section.dataset.project !== project) || shown === 0;
-      if (!section.hidden) visible++;
+    content.querySelectorAll('.service').forEach((card) => {
+      const match = !q || card.dataset.search.includes(q);
+      card.hidden = !match;
+      card.querySelectorAll('.chip').forEach((chip) => chip.classList.toggle('hit', !!q && chip.dataset.pattern.includes(q)));
+      if (match) visible++;
     });
     let note = content.querySelector('.nomatch');
-    const hasProjects = content.querySelector('[data-project]');
-    if (hasProjects && visible === 0) {
+    const hasServices = content.querySelector('.service');
+    if (hasServices && visible === 0) {
       if (!note) { note = document.createElement('p'); note.className = 'nomatch'; content.append(note); }
       note.textContent = 'Không có service nào khớp bộ lọc.';
     } else if (note) { note.remove(); }
   }
 
-  function afterRender() { localizeTimes(); syncProjects(); applyFilters(); }
+  function afterRender() { localizeTimes(); applyFilters(); }
 
   async function refresh() {
     try {
@@ -331,7 +312,6 @@ const SCRIPT = `
     if (paused) { clearTimeout(timer); setStatus('', 'Đã tạm dừng'); } else { refresh(); }
   });
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !paused) refresh(); });
-  projectSelect.addEventListener('change', applyFilters);
   search.addEventListener('input', applyFilters);
 
   afterRender();

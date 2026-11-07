@@ -74,12 +74,12 @@ Mức độ: 🟢 cơ bản · 🟡 trung bình · 🔴 nâng cao
 - [ ] 🟡 **Xử lý xung đột pattern thế nào? Vì sao kiểm tra trước khi ghi?**
   *Ý chính:* owners map pattern → service; khác service và còn instance khác giữ → 409; kiểm tra hết rồi mới ghi để không ghi nửa vời. · 📚 #9
 - [ ] 🟡 **Instance hết hạn được gỡ lúc nào?**
-  *Ý chính:* lazy khi có thao tác trên project + sweeper mỗi TTL/3; hook `onExpire` để log. · 📚 #19
+  *Ý chính:* lazy khi có thao tác (đọc/ghi) + sweeper mỗi TTL/3; hook `onExpire` để log. · 📚 #19
 - [ ] 🟡 **Version tăng khi nào? Vì sao heartbeat không tăng version?**
   *Ý chính:* chỉ khi dữ liệu đổi (so sánh service/host/port/patterns/metadata không phụ thuộc thứ tự); để gateway nhận 304 phần lớn thời gian. · 📚 #8
 - [ ] 🟡 **Bảo vệ registry thế nào? Vì sao so sánh token constant-time?**
   *Ý chính:* ai ghi được là điều hướng được traffic; token cho PUT/DELETE; `timingSafeEqual` trên hash; validate chặt, giới hạn body 64KB. · 📚 #18
-- [ ] 🟢 **Thiết kế API: vì sao PUT? DELETE không tồn tại trả gì? Project rỗng trả gì?**
+- [ ] 🟢 **Thiết kế API: vì sao PUT? DELETE không tồn tại trả gì? Registry rỗng trả gì?**
   *Ý chính:* client chọn id + idempotent; 204 idempotent; 200 rỗng (trạng thái hợp lệ, không phải 404). · 📚 #10
 
 ### B2. Client (`echo-service/src/registry`)
@@ -112,12 +112,15 @@ Mức độ: 🟢 cơ bản · 🟡 trung bình · 🔴 nâng cao
 - [ ] 🟡 **Vì sao server render rồi cập nhật bằng partial HTML thay vì trả JSON cho JS render?**
   *Ý chính:* một chỗ render, escape ở một nơi, xem được khi tắt JS; JSON vẫn có ở `/v1/overview` cho máy. · 📚 #27
 
+- [ ] 🟡 **Vì sao registry của bạn không chia theo project? Đánh đổi so với dùng chung?**
+  *Ý chính:* mỗi project một registry: cách ly vật lý, blast radius nhỏ, mô hình dữ liệu và API đơn giản (một bảng, một version); đổi lại chạy N registry và quy tắc một-pattern-một-service áp dụng cho cả registry. Dùng chung đáng giá khi rất nhiều project nhỏ (Consul namespaces, K8s namespace). · 📚 #28
+
 ---
 
 ## Phần C. Tình huống / system design
 
 - [ ] 🔴 **Thiết kế service registry cho 1000 service, 10.000 instance.**
-  *Ý chính:* nhiều node (Raft hoặc gossip), sharding theo project, watch/long-poll thay polling, delta thay full snapshot, self-preservation, health check chủ động, ACL/mTLS. · 📚 #11, #12, #13
+  *Ý chính:* nhiều node (Raft hoặc gossip), sharding (tách registry theo project application), watch/long-poll thay polling, delta thay full snapshot, self-preservation, health check chủ động, ACL/mTLS. · 📚 #11, #12, #13
 - [ ] 🔴 **Deploy blue/green một service thì registry và gateway hoạt động thế nào?**
   *Ý chính:* cùng tên service → không xung đột pattern; xanh đăng ký, lục deregister khi tắt; gateway thấy sau ≤ 1 chu kỳ poll. · 📚 #9, #15
 - [ ] 🔴 **Tách một pattern từ service A sang service B mà không downtime.**

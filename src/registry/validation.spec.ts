@@ -3,9 +3,9 @@ import { validateRegistration } from './validation.js';
 
 const valid = { service: 'echo', host: 'echo.internal', port: 4001, patterns: ['user.getById'] };
 
-function issuesOf(body: unknown, project = 'example', id = 'echo-1'): string[] {
+function issuesOf(body: unknown, id = 'echo-1'): string[] {
   try {
-    validateRegistration(project, id, body);
+    validateRegistration(id, body);
     return [];
   } catch (error) {
     if (error instanceof ValidationError) return error.issues;
@@ -15,11 +15,11 @@ function issuesOf(body: unknown, project = 'example', id = 'echo-1'): string[] {
 
 describe('validateRegistration', () => {
   it('accepts a valid body and drops unknown fields', () => {
-    expect(validateRegistration('example', 'echo-1', { ...valid, extra: 'ignored' })).toEqual(valid);
+    expect(validateRegistration('echo-1', { ...valid, extra: 'ignored' })).toEqual(valid);
   });
 
   it('keeps string metadata', () => {
-    expect(validateRegistration('example', 'echo-1', { ...valid, metadata: { zone: 'a' } }).metadata).toEqual({
+    expect(validateRegistration('echo-1', { ...valid, metadata: { zone: 'a' } }).metadata).toEqual({
       zone: 'a',
     });
   });
@@ -28,11 +28,9 @@ describe('validateRegistration', () => {
     expect(issuesOf(body)).toContain('Body must be a JSON object.');
   });
 
-  it('rejects invalid project and id names', () => {
-    expect(issuesOf(valid, '../etc', 'bad id')).toEqual([
-      expect.stringContaining('"project"'),
-      expect.stringContaining('"id"'),
-    ]);
+  it('rejects an invalid instance id', () => {
+    expect(issuesOf(valid, 'bad id')).toEqual([expect.stringContaining('"id"')]);
+    expect(issuesOf(valid, '../etc')).toEqual([expect.stringContaining('"id"')]);
   });
 
   it.each(['0.0.0.0', '::', '[::]'])('rejects the unroutable host %s', (host) => {

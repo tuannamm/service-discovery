@@ -13,7 +13,7 @@ import { renderOverviewContent, renderOverviewPage } from './overview.page.js';
 export class OverviewController {
   constructor(private readonly store: RegistryStore) {}
 
-  /** Toàn cảnh dạng JSON: project → service → instance + health. Dùng cho monitoring/CLI. */
+  /** Toàn cảnh dạng JSON: service → instance + health. Dùng cho monitoring/CLI. */
   @Get('v1/overview')
   overview(): Overview {
     return this.store.overview();

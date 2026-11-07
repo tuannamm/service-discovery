@@ -5,8 +5,8 @@ import { RegistryStore } from '../registry/registry-store.js';
  * Gọi `store.sweep()` theo nhịp TTL/3. Timer nằm ở đây (lớp framework), KHÔNG nằm trong core:
  * core chỉ có hàm sweep() thuần nên test gọi trực tiếp, không cần timer giả.
  *
- * Store đã gỡ instance hết hạn "lazy" mỗi khi có người hỏi tới project, nên sweeper không quyết định
- * tính đúng; nó dọn các project không ai hỏi tới (giải phóng RAM, log "expired" đúng lúc).
+ * Store đã gỡ instance hết hạn "lazy" mỗi khi có người hỏi tới, nên sweeper không quyết định
+ * tính đúng; nó dọn khi không ai hỏi (giải phóng RAM, log "expired" đúng lúc).
  * Log "expired" nằm ở hook onExpire của store (app.module.ts), để gỡ kiểu nào cũng có log.
  */
 @Injectable()

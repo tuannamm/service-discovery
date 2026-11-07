@@ -1,6 +1,6 @@
 # PLAN: Service Discovery (Service Registry)
 
-> Mục tiêu: một **sổ danh bạ động** cho hệ thống microservices. Service tự đăng ký "tôi là ai, ở đâu, xử lý những `@MessagePattern` nào"; API Gateway hỏi "trong project P, instance nào xử lý pattern X?".
+> Mục tiêu: một **sổ danh bạ động** cho hệ thống microservices. Service tự đăng ký "tôi là ai, ở đâu, xử lý những `@MessagePattern` nào"; API Gateway hỏi "instance nào xử lý pattern X?". **Một registry phục vụ đúng một project application** (xem mục 10d).
 > Thay cho file tĩnh `discovery.local.json` của gateway (Bước 7 trong `apps/api-gateway/documents/PLAN.md`).
 > Kiến thức học được theo dõi ở [KNOWLEDGE.md](./KNOWLEDGE.md).
 
@@ -15,12 +15,12 @@ Gateway hiện đọc instance từ file tĩnh (`StaticDiscovery`):
 Registry giải quyết cả hai: service **tự đăng ký**, giữ đăng ký bằng **heartbeat**, quá **TTL** thì bị gỡ; gateway **đồng bộ snapshot** ở nền.
 
 ```
-echo-1 ─┐ PUT /v1/projects/example/instances/echo-1   (đăng ký + heartbeat mỗi 5s, kèm patterns)
+echo-1 ─┐ PUT /v1/instances/echo-1   (đăng ký + heartbeat mỗi 5s, kèm patterns)
 echo-2 ─┤
         ▼
   Service Registry :8500   (in-memory, lease TTL 15s, quét hết hạn mỗi 5s)
         ▲
-        │ GET /v1/projects/example/snapshot   (mỗi 3s, If-None-Match → 304 nếu không đổi)
+        │ GET /v1/snapshot   (mỗi 3s, If-None-Match → 304 nếu không đổi)
   API Gateway: snapshot trong RAM → resolve() chỉ đọc bộ nhớ
 ```
 
@@ -32,8 +32,8 @@ echo-2 ─┤
 |---|---|---|
 | 1 | Registry là **project riêng**, nói chuyện qua **HTTP/JSON** | Gateway chỉ biết interface `ServiceDiscovery` |
 | 2 | Tra theo **pattern**, không theo tên service | Service khai báo danh sách `@MessagePattern` khi đăng ký |
-| 3 | Mọi dữ liệu nằm **trong phạm vi project** | Hai project trùng tên pattern không lẫn nhau |
-| 4 | **Một pattern chỉ thuộc một service** trong một project | Xung đột → 409 |
+| 3 | ~~Mọi dữ liệu nằm trong phạm vi project~~ → **Một registry = một project application, không có project trong registry** | Đổi ngày 2026-11-07 (mục 10d). Muốn nhiều project thì chạy nhiều registry |
+| 4 | **Một pattern chỉ thuộc một service** trong registry | Xung đột → 409 |
 | 5 | **Self-registration** + **heartbeat = đăng ký lại đầy đủ** (PUT idempotent) | Soft state: registry mất dữ liệu thì tự khôi phục |
 | 6 | Lưu **in-memory**, một instance registry | Chấp nhận được nhờ soft state |
 | 7 | Ưu tiên **AP** | Registry chết: gateway dùng snapshot cũ, service vẫn chạy |
@@ -51,12 +51,12 @@ echo-2 ─┤
 | 2 | **Lease TTL** | `sweep()` chạy mỗi `TTL/3`, gỡ instance có `now - lastSeen > TTL`. Lưới an toàn cho instance crash/SIGKILL. |
 | 3 | **Huỷ đăng ký** | `DELETE` khi service tắt êm → gateway thôi gửi ở lần poll kế, không chờ TTL. |
 | 4 | **Chặn xung đột pattern** | Pattern đang do service khác giữ (còn instance sống) → 409 `PATTERN_CONFLICT`. Instance cuối của service chủ bị gỡ thì pattern được giải phóng. |
-| 5 | **Cách ly project** | Bảng dữ liệu khoá theo `project`. |
-| 6 | **Snapshot có phiên bản** | `version` theo từng project, **chỉ tăng khi bảng đổi**; heartbeat thuần không tăng → gateway nhận 304. |
+| 5 | **Một bảng duy nhất** | Không khoá theo project; cách ly giữa các project bằng cách chạy registry riêng. |
+| 6 | **Snapshot có phiên bản** | `version` của registry, **chỉ tăng khi bảng đổi**; heartbeat thuần không tăng → gateway nhận 304. |
 | 7 | **ETag kèm `bootId`** | `ETag = "<bootId>-<version>"`. Không có `bootId` thì registry restart đếm lại từ 0, gateway có thể nhận 304 sai. |
 | 8 | **Validate đầu vào** | Gom mọi lỗi, trả 400 problem+json. |
 | 9 | **Bảo vệ ghi (tuỳ chọn)** | `REGISTRY_TOKEN` đặt thì `PUT`/`DELETE` cần header `x-registry-token`. |
-| 10 | **Health + debug** | `GET /health`, `GET /v1/projects`. |
+| 10 | **Health + trang quản trị** | `GET /health`, `GET /v1/overview` (JSON), `GET /lists` (HTML). |
 
 ---
 
@@ -75,13 +75,11 @@ interface RegistrationInput {
 /** Bản ghi registry giữ trong RAM. */
 interface InstanceRecord extends RegistrationInput {
   id: string;
-  project: string;
   lastSeen: number;     // monotonic clock (performance.now), dùng để tính TTL
 }
 
 /** GET snapshot trả về (cùng hình dạng file discovery tĩnh của gateway). */
 interface Snapshot {
-  project: string;
   version: number;
   instances: Array<{ id: string; service: string; host: string; port: number; patterns: string[] }>;
 }
@@ -89,14 +87,12 @@ interface Snapshot {
 
 Cấu trúc bên trong `RegistryStore`:
 ```
-projects: Map<project, {
-  version: number,
-  instances: Map<id, InstanceRecord>,
-  owners: Map<pattern, service>     // để kiểm tra xung đột O(1)
-}>
+version: number,
+instances: Map<id, InstanceRecord>,
+owners: Map<pattern, service>     // để kiểm tra xung đột O(1)
 ```
 
-**Quy tắc khi `register(project, id, input)`:**
+**Quy tắc khi `register(id, input)`:**
 1. Validate `input`.
 2. Kiểm tra xung đột **trước khi ghi**: với mỗi pattern, nếu `owners` có service khác `input.service` → ném `PatternConflictError` (không ghi gì cả, tránh ghi dở).
 3. So với bản ghi cũ cùng `id`: nếu `service/host/port/patterns/metadata` khác (hoặc mới hoàn toàn) → ghi đè, tính lại `owners`, `version++`. Nếu giống hệt → chỉ cập nhật `lastSeen` (heartbeat).
@@ -110,17 +106,17 @@ projects: Map<project, {
 
 | Method | Path | Thành công | Lỗi |
 |---|---|---|---|
-| `PUT` | `/v1/projects/:project/instances/:id` | 200 `{ leaseTtlMs, heartbeatIntervalMs }` | 400 dữ liệu sai · 401 sai token · 409 xung đột pattern |
-| `DELETE` | `/v1/projects/:project/instances/:id` | 204 (không tồn tại cũng 204: idempotent) | 401 |
-| `GET` | `/v1/projects/:project/snapshot` | 200 + `ETag`; `If-None-Match` khớp → 304 | |
-| `GET` | `/v1/projects` | 200 `[{ project, version, instanceCount }]` | |
+| `PUT` | `/v1/instances/:id` | 200 `{ leaseTtlMs, heartbeatIntervalMs }` | 400 dữ liệu sai · 401 sai token · 409 xung đột pattern |
+| `DELETE` | `/v1/instances/:id` | 204 (không tồn tại cũng 204: idempotent) | 401 |
+| `GET` | `/v1/snapshot` | 200 + `ETag`; `If-None-Match` khớp → 304 | |
+| `GET` | `/v1/overview` | 200 JSON service → instance + health | |
 | `GET` | `/health` | 200 `{ status: "ok" }` | |
 
-Project chưa từng có instance → snapshot rỗng `{ version: 0, instances: [] }` (200, không phải 404): gateway coi như "chưa ai đăng ký".
+Registry chưa có instance nào → snapshot rỗng `{ version: 0, instances: [] }` (200, không phải 404): gateway coi như "chưa ai đăng ký".
 
 Ví dụ:
 ```http
-PUT /v1/projects/example/instances/echo-1
+PUT /v1/instances/echo-1
 Content-Type: application/json
 
 { "service": "echo", "host": "127.0.0.1", "port": 4001,
@@ -131,11 +127,11 @@ HTTP/1.1 409 Conflict
 Content-Type: application/problem+json
 
 { "type": "about:blank", "title": "Conflict", "status": 409, "code": "PATTERN_CONFLICT",
-  "detail": "Pattern \"user.getById\" in project \"example\" is already handled by service \"user\"." }
+  "detail": "Pattern \"user.getById\" is already handled by service \"user\"." }
 ```
 
 **Validate:**
-- `project`, `service`: `^[a-z0-9][a-z0-9-]{0,62}$`
+- `service`: `^[a-z0-9][a-z0-9-]{0,62}$`
 - `id`: `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`
 - `host`: chuỗi không rỗng, **khác** `0.0.0.0` và `::`
 - `port`: số nguyên 1–65535
@@ -167,7 +163,7 @@ apps/service-discovery/
 │   │   ├── clock.ts                interface Clock { now(): number } + systemClock
 │   │   ├── validation.ts           validate input, gom mọi lỗi
 │   │   ├── errors.ts               ValidationError, PatternConflictError
-│   │   ├── registry-store.ts       register / deregister / sweep / snapshot / projects
+│   │   ├── registry-store.ts       register / deregister / sweep / snapshot / overview
 │   │   └── registry-store.spec.ts
 │   └── http/                       lớp mỏng NestJS
 │       ├── registry.controller.ts  HTTP ↔ store; ETag / 304
@@ -200,7 +196,7 @@ apps/service-discovery/
 5. Cập nhật KNOWLEDGE.md + README.
 
 ### Phần 2 (tóm tắt): `registry-client`
-- `RegistryModule.forRoot({ registryUrl, project, service, advertiseHost, port, instanceId?, token? })` + biến thể đọc env.
+- `RegistryModule.forRoot({ registryUrl, service, advertiseHost, port, instanceId?, token? })` + biến thể đọc env.
 - Tự thu thập `@MessagePattern` bằng `DiscoveryService` + `MetadataScanner`; bỏ `@EventPattern`; pattern không phải string → bỏ qua + cảnh báo.
 - Vòng đời: bootstrap → PUT + heartbeat theo `heartbeatIntervalMs` registry trả về (timer `unref`); registry chết → service vẫn chạy, thử lại nhịp kế; 409 → log lỗi rõ; shutdown → `DELETE` best effort.
 - `instanceId` mặc định `<service>-<hostname>-<port>`.
@@ -225,7 +221,7 @@ apps/service-discovery/
 - Instance cuối của service chủ hết hạn → service khác đăng ký được pattern đó.
 - Cùng service nhiều instance cùng pattern → hợp lệ.
 - `deregister` → gỡ; id không tồn tại → không lỗi, không tăng version.
-- Cách ly project: cùng pattern ở hai project không xung đột.
+- Một pattern, một service áp dụng cho toàn registry (không còn phạm vi project).
 
 **Unit `validation`, `config`.**
 
@@ -233,10 +229,10 @@ apps/service-discovery/
 
 **Kiểm chứng tay:**
 ```bash
-curl -X PUT localhost:8500/v1/projects/example/instances/echo-1 \
+curl -X PUT localhost:8500/v1/instances/echo-1 \
   -H 'content-type: application/json' \
   -d '{"service":"echo","host":"127.0.0.1","port":4001,"patterns":["user.getById"]}'
-curl -i localhost:8500/v1/projects/example/snapshot
+curl -i localhost:8500/v1/snapshot
 # chờ > 15s không heartbeat → snapshot rỗng
 ```
 
@@ -256,8 +252,8 @@ Nhiều instance registry / replication (gossip, Raft), lưu bền, health check
 | 3 | TTL / heartbeat / poll | **15s / 5s / 3s** |
 
 **Thay đổi so với thiết kế ban đầu (phát sinh khi code):**
-- **Hết hạn lazy + quét định kỳ:** `register`/`snapshot` gỡ instance hết hạn của project trước khi xử lý; sweeper chỉ dọn project không ai hỏi. Log "expired" qua hook `onExpire` của store.
-- **Không xoá state khi project hết instance**, để version không lùi.
+- **Hết hạn lazy + quét định kỳ:** `register`/`snapshot` gỡ instance hết hạn trước khi xử lý; sweeper chỉ dọn khi không ai hỏi. Log "expired" qua hook `onExpire` của store.
+- **Version không bao giờ lùi** trong một lần chạy, kể cả khi registry hết instance.
 - **Bỏ `registeredAt`**: không dùng trong logic.
 - `PUT` trả thêm `status: created | updated | renewed`: client phát hiện registry vừa restart (đang `registered` mà nhận `created`).
 - Client **đăng ký sau `app.listen()`** (main.ts gọi `RegistryRegistration.start()`), **deregister ở `beforeApplicationShutdown`** (trước khi NestJS đóng cổng TCP).
@@ -290,13 +286,32 @@ TTL 6s, gateway poll 1s, 2 echo:
 | Bảo mật | Escape mọi chuỗi + **CSP có nonce** (script) + `no-store`, `nosniff` | `patterns`/`metadata`/`host` do service gửi lên → nguy cơ stored XSS |
 
 **Code:**
-- `registry/registry-store.ts`: `overview()` gom project → service → instance; thêm `registeredAt` (giờ thực, chỉ hiển thị, giữ nguyên qua heartbeat/update) qua option `wallClock`.
+- `registry/registry-store.ts`: `overview()` gom service → instance; thêm `registeredAt` (giờ thực, chỉ hiển thị, giữ nguyên qua heartbeat/update) qua option `wallClock`.
 - `http/overview.page.ts`: `renderOverviewPage`, `renderOverviewContent`, `escapeHtml` (hàm thuần, test không cần trình duyệt).
 - `http/overview.controller.ts`: `GET /v1/overview` (JSON), `GET /lists` (HTML, `?partial=1` chỉ trả phần nội dung).
 
 **Test:** 4 unit (`overview`: gom nhóm, ngưỡng healthy/late, ẩn instance hết hạn, giữ `registeredAt`) + 5 e2e (JSON, CSP nonce, nonce mới mỗi lần, escape XSS, partial + trạng thái rỗng). Đã chụp màn hình chạy thật ở chế độ sáng/tối/màn hẹp.
 
 **Chưa làm:** health check chủ động (registry tự kết nối TCP tới service), lịch sử (instance đã bị gỡ lúc nào).
+
+## 10d. Bỏ khái niệm project khỏi registry (2026-11-07)
+
+**Quyết định (của bạn):** mỗi project application có **registry riêng**, nên registry chỉ cần quản lý service nào đăng ký vào nó, không cần chia theo project. Đảo lại quyết định #3 ở mục 2.
+
+| Thay đổi | Trước | Sau |
+|---|---|---|
+| API | `/v1/projects/:project/instances/:id`, `/v1/projects/:project/snapshot`, `/v1/projects` | `/v1/instances/:id`, `/v1/snapshot` (bỏ `/v1/projects`) |
+| `RegistryStore` | `Map<project, state>` | một bảng; `register(id, body)`, `deregister(id)`, `snapshot()` |
+| Snapshot | `{ project, version, instances }` | `{ version, instances }` |
+| `/lists` | nhóm theo project, ô lọc project | thẻ service ngay dưới phần tổng hợp, chỉ còn ô tìm |
+| Client (echo-service) | env `REGISTRY_PROJECT` | bỏ; chỉ cần `REGISTRY_URL`, `REGISTRY_ADVERTISE_HOST` |
+| Gateway `ServiceDiscovery` | `resolve(project, pattern)` | `resolve(pattern)` |
+| File discovery tĩnh | mỗi instance có `project` | bỏ field `project` |
+| Khoá cân bằng tải | `project\|pattern` | `pattern` (một gateway chỉ phục vụ một project) |
+
+**Không đổi:** `GATEWAY_PROJECT` vẫn dùng để chọn file spec (`specs/<project>/openapi.yml`) và gửi `meta.project` cho service; không liên quan tới registry.
+
+**Đánh đổi chấp nhận:** không dùng chung một registry cho nhiều project; quy tắc "một pattern một service" áp dụng cho cả registry; phá vỡ API cũ (không giữ route cũ). Đổi lại bỏ được một lớp cấu hình và một lỗi hay gặp (service đặt `REGISTRY_PROJECT` lệch `GATEWAY_PROJECT` thì gateway âm thầm trả 503).
 
 ## 11. Cách làm việc
 - Claude viết code, bạn đọc, hiểu và hỏi lại. Mỗi file: giải thích "tại sao" trước, kèm câu hỏi phỏng vấn liên quan.

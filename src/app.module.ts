@@ -43,6 +43,6 @@ function createStore(config: RegistryConfig, clock?: Clock): RegistryStore {
     leaseTtlMs: config.leaseTtlMs,
     clock,
     onExpire: (record) =>
-      logger.warn(`expired ${record.project}/${record.id} (no heartbeat for > ${config.leaseTtlMs}ms)`),
+      logger.warn(`expired ${record.id} (no heartbeat for > ${config.leaseTtlMs}ms)`),
   });
 }

@@ -361,7 +361,7 @@ footer { color: var(--muted); font-size: 12.5px; padding-block: 0 32px; }
       <div>
         <span class="eyebrow">Service discovery · HTTP + JSON · NestJS · in-memory</span>
         <h1>Service tự đăng ký, <em>gateway tự biết</em> ai đang sống.</h1>
-        <p class="lead">Registry là một <b>sổ danh bạ động</b>: mỗi instance tự ghi tên mình kèm danh sách <code>@MessagePattern</code> nó xử lý, rồi gia hạn đều đặn. Gateway không hỏi "service user ở đâu" mà hỏi "trong project này, ai xử lý pattern <code>user.getById</code>".</p>
+        <p class="lead">Registry là một <b>sổ danh bạ động</b>: mỗi instance tự ghi tên mình kèm danh sách <code>@MessagePattern</code> nó xử lý, rồi gia hạn đều đặn. Gateway không hỏi "service user ở đâu" mà hỏi "ai xử lý pattern <code>user.getById</code>". Mỗi project application chạy một registry riêng.</p>
         <p class="lead">Sổ nằm trong RAM và là <b>soft state</b>: bản ghi nào không được gia hạn thì tự hết hạn, registry restart thì các service tự đăng ký lại. Khi mạng có sự cố, hệ thống chọn <b>AP</b>: thà dùng bảng hơi cũ còn hơn từ chối phục vụ.</p>
       </div>
       <div class="panel meter" id="meter"></div>
@@ -630,15 +630,15 @@ footer { color: var(--muted); font-size: 12.5px; padding-block: 0 32px; }
   // ================= OVERVIEW: simulator (vòng đời một instance) =================
   const STEPS = [
     { t: 'Thu thập pattern', file: 'registry-client.module.ts · pattern-collector.ts', d: 'Lúc khởi động, DiscoveryService + MetadataScanner duyệt mọi controller và đọc metadata <code>@MessagePattern</code>. <code>@EventPattern</code> bị bỏ qua (event đi qua broker, gateway không gọi tới); pattern dạng object như <code>{ cmd: "x" }</code> bị bỏ qua kèm cảnh báo vì operationId luôn là chuỗi.', fails: [] },
-    { t: 'Đăng ký (PUT)', file: 'registry-client.ts → registry.controller.ts', d: '<code>PUT /v1/projects/:project/instances/:id</code> với body đầy đủ <code>{ service, host, port, patterns }</code>. <code>host</code> là địa chỉ quảng bá mà gateway gọi tới được, không bao giờ là 0.0.0.0. Registry kiểm tra theo thứ tự: token, hình dạng body, rồi xung đột pattern TRƯỚC khi ghi.', fails: ['401 UNAUTHORIZED', '400 INVALID_REGISTRATION', '409 PATTERN_CONFLICT'] },
+    { t: 'Đăng ký (PUT)', file: 'registry-client.ts → registry.controller.ts', d: '<code>PUT /v1/instances/:id</code> với body đầy đủ <code>{ service, host, port, patterns }</code>. <code>host</code> là địa chỉ quảng bá mà gateway gọi tới được, không bao giờ là 0.0.0.0. Registry kiểm tra theo thứ tự: token, hình dạng body, rồi xung đột pattern TRƯỚC khi ghi.', fails: ['401 UNAUTHORIZED', '400 INVALID_REGISTRATION', '409 PATTERN_CONFLICT'] },
     { t: 'Ghi vào RegistryStore', file: 'registry-store.ts', d: 'Upsert bản ghi và đặt hạn lease. <code>version</code> chỉ tăng khi dữ liệu thật sự đổi. Trả về <code>{ status: created | updated | renewed, leaseTtlMs, heartbeatIntervalMs }</code>, trong đó <code>heartbeatIntervalMs = TTL/3</code>: lỡ hai nhịp liên tiếp vẫn chưa bị gỡ.', fails: [] },
     { t: 'Heartbeat', file: 'registry-client.ts', d: 'Gửi lại đúng PUT đó mỗi <code>heartbeatIntervalMs</code>, bằng setTimeout nối tiếp (xong lần này mới hẹn lần sau) và <code>unref()</code> để timer không giữ process sống. Body y hệt → <code>renewed</code>, version không đổi → gateway nhận 304.', fails: ['registry chết → thử lại, service vẫn chạy'] },
-    { t: 'Gateway đồng bộ', file: 'registry-discovery.ts', d: 'Cứ 3s gateway <code>GET /v1/projects/:project/snapshot</code> kèm <code>If-None-Match</code>. 200: dựng bảng pattern → instances mới rồi thay cả bảng một lần. 304: giữ nguyên. Lỗi mạng hay 5xx: giữ bảng cũ (stale-on-error). <code>resolve()</code> chỉ đọc bảng này.', fails: ['503 NO_INSTANCE khi chưa có snapshot'] },
-    { t: 'Rời đi', file: 'registry-client.module.ts · registry-store.ts · sweeper.service.ts', d: 'SIGTERM: <code>beforeApplicationShutdown</code> gửi DELETE (204) trước khi đóng cổng, lần poll kế tiếp gateway không còn thấy instance. SIGKILL: không có DELETE, lease hết hạn; registry gỡ lazy khi có người đọc project và sweep mỗi TTL/3, hook <code>onExpire</code> ghi log.', fails: ['204 DELETE', 'expired theo TTL'] },
+    { t: 'Gateway đồng bộ', file: 'registry-discovery.ts', d: 'Cứ 3s gateway <code>GET /v1/snapshot</code> kèm <code>If-None-Match</code>. 200: dựng bảng pattern → instances mới rồi thay cả bảng một lần. 304: giữ nguyên. Lỗi mạng hay 5xx: giữ bảng cũ (stale-on-error). <code>resolve()</code> chỉ đọc bảng này.', fails: ['503 NO_INSTANCE khi chưa có snapshot'] },
+    { t: 'Rời đi', file: 'registry-client.module.ts · registry-store.ts · sweeper.service.ts', d: 'SIGTERM: <code>beforeApplicationShutdown</code> gửi DELETE (204) trước khi đóng cổng, lần poll kế tiếp gateway không còn thấy instance. SIGKILL: không có DELETE, lease hết hạn; registry gỡ lazy khi có người đọc và sweep mỗi TTL/3, hook <code>onExpire</code> ghi log.', fails: ['204 DELETE', 'expired theo TTL'] },
   ];
   const problem = (status, title, code, detail, instance, extra = {}) =>
     JSON.stringify({ type: 'about:blank', title, status, code, detail, instance, ...extra }, null, 2);
-  const PUT = 'PUT /v1/projects/example/instances/echo-1\nx-registry-token: ••••\n\n' +
+  const PUT = 'PUT /v1/instances/echo-1\nx-registry-token: ••••\n\n' +
     '{ "service": "echo", "host": "echo-1", "port": 4001,\n  "patterns": ["auth.login", "user.create", "user.getById", "user.list"] }';
   // Mỗi tình huống: passed = các bước đã đi qua, stop = bước dừng lại (null nếu không dừng),
   // focus = bước mở sẵn trong khung chi tiết, status + tone = huy hiệu kết quả (s2 xanh, s4 vàng, s5 đỏ).
@@ -646,32 +646,32 @@ footer { color: var(--muted); font-size: 12.5px; padding-block: 0 32px; }
     { name: 'Bình thường: đăng ký + heartbeat', req: 'PUT mỗi 5s · GET mỗi 3s', status: '200', tone: 's2',
       passed: [0, 1, 2, 3, 4], stop: null, focus: 3,
       res: PUT + '\n\nHTTP/1.1 200 OK\n{ "status": "renewed", "leaseTtlMs": 15000, "heartbeatIntervalMs": 5000 }\n\n' +
-        'GET /v1/projects/example/snapshot\nif-none-match: "7c2e…-2"\n\nHTTP/1.1 304 Not Modified\netag: "7c2e…-2"',
+        'GET /v1/snapshot\nif-none-match: "7c2e…-2"\n\nHTTP/1.1 304 Not Modified\netag: "7c2e…-2"',
       note: 'Lần đầu "created", sau đó mỗi heartbeat là "renewed". Bảng không đổi nên version đứng yên và mỗi lần poll của gateway chỉ tốn một 304 rỗng.' },
     { name: 'SIGTERM: tắt êm', req: 'docker stop echo-1', status: '204', tone: 's2',
       passed: [0, 1, 2, 3, 4, 5], stop: null, focus: 5,
-      res: 'DELETE /v1/projects/example/instances/echo-1\nx-registry-token: ••••\n\nHTTP/1.1 204 No Content\n\n' +
-        '[Registry] deregistered example/echo-1\n\nGET /v1/projects/example/snapshot\nif-none-match: "7c2e…-2"\n\n' +
-        'HTTP/1.1 200 OK\netag: "7c2e…-3"\n{ "project": "example", "version": 3, "instances": [ …chỉ còn echo-2… ] }',
+      res: 'DELETE /v1/instances/echo-1\nx-registry-token: ••••\n\nHTTP/1.1 204 No Content\n\n' +
+        '[Registry] deregistered echo-1\n\nGET /v1/snapshot\nif-none-match: "7c2e…-2"\n\n' +
+        'HTTP/1.1 200 OK\netag: "7c2e…-3"\n{ "version": 3, "instances": [ …chỉ còn echo-2… ] }',
       note: 'DELETE chạy trong beforeApplicationShutdown, trước khi cổng TCP đóng. Gateway thôi gửi tới echo-1 sau tối đa một nhịp poll (≤ 3s).' },
     { name: 'SIGKILL: crash', req: 'kill -9 echo-1', status: 'TTL', tone: 's4',
       passed: [0, 1, 2, 3, 4, 5], stop: null, focus: 5,
       res: '(không có DELETE: process chết ngay)\n\n... heartbeat ngừng, lease đếm ngược ...\n\n' +
-        '[Registry] expired example/echo-1 (no heartbeat for > 15000ms)\n\nGET /v1/projects/example/snapshot\n\n' +
+        '[Registry] expired echo-1 (no heartbeat for > 15000ms)\n\nGET /v1/snapshot\n\n' +
         'HTTP/1.1 200 OK\n{ "version": 3, "instances": [ …chỉ còn echo-2… ] }',
-      note: 'Không ai báo, nên instance chỉ biến mất khi lease hết hạn: tính từ heartbeat cuối, chậm nhất ≈ TTL + một nhịp poll (snapshot gỡ lazy ngay lúc đọc; sweep mỗi TTL/3 chỉ dọn project không ai đọc và ghi log). Chạy thật với TTL 6s đo được ~5s tính từ lúc kill. Trong khoảng đó failover của gateway đỡ cho request.' },
+      note: 'Không ai báo, nên instance chỉ biến mất khi lease hết hạn: tính từ heartbeat cuối, chậm nhất ≈ TTL + một nhịp poll (snapshot gỡ lazy ngay lúc đọc; sweep mỗi TTL/3 chỉ dọn khi không ai đọc và ghi log). Chạy thật với TTL 6s đo được ~5s tính từ lúc kill. Trong khoảng đó failover của gateway đỡ cho request.' },
     { name: 'Xung đột pattern', req: 'billing đăng ký "user.getById"', status: '409', tone: 's4',
       passed: [0], stop: 1, focus: 1,
-      res: 'PUT /v1/projects/example/instances/billing-1\n{ "service": "billing", ..., "patterns": ["user.getById"] }\n\n' +
+      res: 'PUT /v1/instances/billing-1\n{ "service": "billing", ..., "patterns": ["user.getById"] }\n\n' +
         'HTTP/1.1 409 Conflict\ncontent-type: application/problem+json\n\n' +
-        problem(409, 'Conflict', 'PATTERN_CONFLICT', 'Pattern "user.getById" in project "example" is already handled by service "echo".',
-          '/v1/projects/example/instances/billing-1', { conflicts: [{ pattern: 'user.getById', owner: 'echo' }] }),
-      note: 'Một pattern chỉ thuộc một service trong một project (nhiều instance của cùng service thì được). Kiểm tra trước khi ghi nên không có gì thay đổi, version giữ nguyên.' },
+        problem(409, 'Conflict', 'PATTERN_CONFLICT', 'Pattern "user.getById" is already handled by service "echo".',
+          '/v1/instances/billing-1', { conflicts: [{ pattern: 'user.getById', owner: 'echo' }] }),
+      note: 'Một pattern chỉ thuộc một service trong registry (nhiều instance của cùng service thì được). Kiểm tra trước khi ghi nên không có gì thay đổi, version giữ nguyên.' },
     { name: 'Advertise 0.0.0.0', req: 'host: "0.0.0.0"', status: '400', tone: 's4',
       passed: [0], stop: 1, focus: 1,
-      res: 'PUT /v1/projects/example/instances/echo-1\n{ "service": "echo", "host": "0.0.0.0", "port": 4001, ... }\n\n' +
+      res: 'PUT /v1/instances/echo-1\n{ "service": "echo", "host": "0.0.0.0", "port": 4001, ... }\n\n' +
         'HTTP/1.1 400 Bad Request\ncontent-type: application/problem+json\n\n' +
-        problem(400, 'Bad Request', 'INVALID_REGISTRATION', 'The registration is invalid.', '/v1/projects/example/instances/echo-1',
+        problem(400, 'Bad Request', 'INVALID_REGISTRATION', 'The registration is invalid.', '/v1/instances/echo-1',
           { errors: ['"host" must be an address other services can reach, not "0.0.0.0" (set an advertise host).'] }),
       note: '0.0.0.0 là địa chỉ để LẮNG NGHE, không phải để GỌI TỚI. echo-service tự chặn từ lúc đọc env (REGISTRY_ADVERTISE_HOST); registry chặn lần nữa cho client khác.' },
     { name: 'Registry restart', req: 'registry mất RAM', status: '200', tone: 's2',
@@ -679,7 +679,7 @@ footer { color: var(--muted); font-size: 12.5px; padding-block: 0 32px; }
       res: '[Gateway] Registry unreachable (fetch failed); keeping the last snapshot (2 instance(s)).\n\n' +
         '... registry lên lại, bootId mới, sổ rỗng ...\n\n' + PUT.split('\n')[0] + '\n\nHTTP/1.1 200 OK\n{ "status": "created", ... }\n\n' +
         '[echo] Registry had lost this instance (restarted?); re-registered echo/echo-1.\n\n' +
-        'GET /v1/projects/example/snapshot\nif-none-match: "7c2e…-2"\n\nHTTP/1.1 200 OK\netag: "a91d…-1"',
+        'GET /v1/snapshot\nif-none-match: "7c2e…-2"\n\nHTTP/1.1 200 OK\netag: "a91d…-1"',
       note: 'Trong lúc registry chết, gateway dùng bảng cũ. Heartbeat kế tiếp mang body đầy đủ nên nhận "created" và client cảnh báo "re-registered". Version đếm lại từ 1, nhưng ETag khác nhờ bootId nên gateway không nhận nhầm 304.' },
     { name: 'Gateway khởi động khi registry chết', req: 'registry chưa lên', status: '503', tone: 's5',
       passed: [0], stop: 4, focus: 4,

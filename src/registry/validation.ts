@@ -1,7 +1,7 @@
 import { ValidationError } from './errors.js';
 import type { RegistrationInput } from './types.js';
 
-/** Tên project/service: chữ thường, số, `-`; bắt đầu bằng chữ/số. Giống tên DNS label. */
+/** Tên service: chữ thường, số, `-`; bắt đầu bằng chữ/số. Giống tên DNS label. */
 export const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
 /** Instance id: rộng hơn một chút để chứa hostname (`echo-my-host.local-4001`). */
 export const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -15,12 +15,6 @@ export const MAX_HOST_LENGTH = 253;
 /** Địa chỉ "mọi card mạng": nghe được, nhưng không ai GỌI TỚI được. */
 const UNROUTABLE_HOSTS = new Set(['0.0.0.0', '::', '[::]']);
 
-export function validateProject(project: string): void {
-  if (!NAME_PATTERN.test(project)) {
-    throw new ValidationError([`"project" must match ${NAME_PATTERN}.`]);
-  }
-}
-
 export function validateInstanceId(id: string): void {
   if (!ID_PATTERN.test(id)) {
     throw new ValidationError([`"id" must match ${ID_PATTERN}.`]);
@@ -32,9 +26,8 @@ export function validateInstanceId(id: string): void {
  * Nhận `unknown` vì body đến từ mạng: không được tin kiểu dữ liệu.
  * Trả về bản đã chuẩn hoá (chỉ giữ field đã biết, bỏ field lạ).
  */
-export function validateRegistration(project: string, id: string, body: unknown): RegistrationInput {
+export function validateRegistration(id: string, body: unknown): RegistrationInput {
   const issues: string[] = [];
-  if (!NAME_PATTERN.test(project)) issues.push(`"project" must match ${NAME_PATTERN}.`);
   if (!ID_PATTERN.test(id)) issues.push(`"id" must match ${ID_PATTERN}.`);
 
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {

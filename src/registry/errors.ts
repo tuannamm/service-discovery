@@ -16,13 +16,10 @@ export class ValidationError extends Error {
 export class PatternConflictError extends Error {
   readonly code = 'PATTERN_CONFLICT';
 
-  constructor(
-    readonly project: string,
-    readonly conflicts: Array<{ pattern: string; owner: string }>,
-  ) {
+  constructor(readonly conflicts: Array<{ pattern: string; owner: string }>) {
     super(
       conflicts
-        .map((c) => `Pattern "${c.pattern}" in project "${project}" is already handled by service "${c.owner}".`)
+        .map((c) => `Pattern "${c.pattern}" is already handled by service "${c.owner}".`)
         .join(' '),
     );
     this.name = 'PatternConflictError';
