@@ -185,8 +185,8 @@ const data = {
 
 // Nhúng JSON vào <script type="application/json">: phải chặn chuỗi "</script" và "<!--".
 const json = JSON.stringify(data).replace(/</g, '\\u003c');
-const html = read('scripts/knowledge.template.html').replace('__KNOWLEDGE_DATA__', () => json);
-writeFileSync(path.join(appDir, 'knowledge.html'), html);
+const html = readFileSync(path.resolve(appDir, '../../knowledge-base/projects/service-discovery/template.html'), 'utf8').replace('__KNOWLEDGE_DATA__', () => json);
+writeFileSync(path.resolve(appDir, '../../knowledge-base/projects/service-discovery/knowledge.html'), html);
 
 console.log(
   `knowledge.html: ${knowledge.topics.length} topics, ${questions.length} questions, ` +
